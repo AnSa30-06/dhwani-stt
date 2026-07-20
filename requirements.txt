@@ -1,5 +1,8 @@
 # Local ASR engine for the baseline / your submission (all local, no cloud at scoring).
 faster-whisper>=1.0        # or whisper.cpp bindings, parakeet (nemo/onnx), qwen3-asr via transformers
+# dhwani solution: Apple-GPU backend, auto-selected when importable (solution/draft.py).
+# On non-Apple machines the solution falls back to faster-whisper above.
+mlx-whisper>=0.4 ; sys_platform == "darwin" and platform_machine == "arm64"
 # Corpus audio fetch (used by scripts/fetch_audio.py on the Action, not at scoring time):
 datasets>=2.18
 soundfile>=0.12
