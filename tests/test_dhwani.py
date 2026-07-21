@@ -167,6 +167,23 @@ def test_router_escalates_hindi_to_mix_model(monkeypatch):
         f"mix model never used: {finals}")
 
 
+def test_router_uses_transformers_backend_for_hf_repo(monkeypatch):
+    """A mix model named like an HF repo (contains '/') routes through the
+    transformers path, not the native backend."""
+    calls: list = []
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "someone/some-hinglish-model")
+    monkeypatch.setattr(D, "_transcribe", make_fake(raw_lang="hi"))
+    monkeypatch.setattr(
+        D, "_transcribe_mix_transformers",
+        lambda window: (calls.append(len(window)) or [(" mix out", 0.0, 2.0)], "hi"))
+    D.draft_reset()
+
+    text = D._final_decode(speech(2.0))
+    assert calls, "transformers mix path was never invoked"
+    assert "mix" in text or text.strip(), f"unexpected final: {text!r}"
+
+
 def test_router_leaves_english_on_default_model(monkeypatch):
     record: list = []
     monkeypatch.delenv("DHWANI_LANG", raising=False)
@@ -178,3 +195,60 @@ def test_router_leaves_english_on_default_model(monkeypatch):
     finals = [r for r in record if r["final"]]
     assert all(r["model"] is None for r in finals), (
         f"English clip escalated to the mix model: {finals}")
+
+
+def make_fake_devanagari(record=None):
+    """Fake whose transcript is pure Devanagari — no code-switch signal."""
+    def fake(window, lang, prompt, final=False, model=None):
+        if record is not None:
+            record.append({"model": model, "final": final})
+        secs = max(1, round(len(window) / BPS))
+        return [(f" शब्द{i}", float(i), float(i) + 0.5) for i in range(secs)], "hi"
+    return fake
+
+
+def test_router_keeps_pure_hindi_off_mix_model(monkeypatch):
+    """Measured: Apex scores 5.6/70 on pure-Devanagari Hindi. A Hindi clip with
+    no Latin in the primary decode must NOT escalate."""
+    record: list = []
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "someone/mix-model")
+    monkeypatch.setattr(D, "_transcribe", make_fake_devanagari(record))
+    called = []
+    monkeypatch.setattr(D, "_transcribe_mix_transformers",
+                        lambda window: (called.append(1) or [(" x", 0.0, 1.0)], "hi"))
+    D.draft_reset()
+
+    text = D._final_decode(speech(2.0))
+    assert not called, "pure-Devanagari clip escalated to the mix model"
+    assert "शब्द" in text
+
+
+def test_mix_candidate_rejected_when_it_drops_a_number(monkeypatch):
+    """Measured on Apex: '334' came back as '3.3 0.4'. If the healthy primary
+    heard a multi-digit number the mix candidate lost, keep the primary."""
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "someone/mix-model")
+
+    def primary(window, lang, prompt, final=False, model=None):
+        return ([(" version", 0.0, 0.5), (" 334", 0.5, 1.0), (" use", 1.0, 1.5),
+                 (" करो", 1.5, 2.0)], "hi")
+    monkeypatch.setattr(D, "_transcribe", primary)
+    monkeypatch.setattr(
+        D, "_transcribe_mix_transformers",
+        lambda window: ([(" version teen point teen use karo bahut hi badhiya"
+                          " tarika hai yeh", 0.0, 2.0)], "hi"))
+    D.draft_reset()
+
+    text = D._final_decode(speech(2.0))
+    assert "334" in text, f"number was lost to the mix candidate: {text!r}"
+
+
+def test_drops_numbers_helper():
+    assert D._drops_numbers("version 334 use karo", "version teen use karo")
+    assert not D._drops_numbers("version 334 use karo", "version 334 hi to hai")
+    assert not D._drops_numbers("koi number nahi", "still no number")
+    # single digits are ignored
+    assert not D._drops_numbers("le lo 5 cheezen", "le lo paanch cheezen")
+    # the guard sees number-normalized text: 3.3.4 == 334
+    assert not D._drops_numbers("version 334", "version 3.3.4")

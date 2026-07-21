@@ -216,23 +216,38 @@ def _final_decode(audio: bytes) -> str:
     # an Indic language that isn't hi (Urdu -> Arabic script -> scores zero), an
     # outright hallucination (loop, blank, a language not in this en+hi corpus),
     # or the primary decode raised (text is still ""). The same pass doubles as
-    # the ROUTER's escalation: when DHWANI_MIX_MODEL names a dedicated
-    # Hindi/code-switch model, every Hindi-detected clip re-decodes on it and
-    # _pick_better keeps the cleaner, longer candidate. English clips never pay
-    # for the second decode.
+    # the ROUTER's escalation to DHWANI_MIX_MODEL — but ONLY for code-switched
+    # audio (Latin letters in the Hindi-detected primary). Measured 2026-07-22
+    # on 15 local clips: Apex scored 55.8/70 on Hinglish (meanings 0.92/0.94 vs
+    # turbo's ~0.85 on the Mac) but 5.6/70 on pure-Devanagari FLEURS-Hindi —
+    # romanized output only survives where romanized gold_alternatives exist,
+    # and pure-Hindi rows in the local manifests don't carry them.
     mix = _mix_model()
-    if not forced and (
+    bad = (
         not text
         or (raw in _INDIC and raw != "hi")
         or _looks_bad(text)
         or (raw not in ("en", "hi") and raw is not None)
-        or (mix is not None and raw in _INDIC)
-    ):
+    )
+    want_mix = mix is not None and raw in _INDIC and (bad or _has_latin(text))
+    if not forced and (bad or want_mix):
         try:
-            kw = {"model": mix} if mix else {}
-            words_hi, _ = _transcribe(audio, "hi", prompt="", final=True, **kw)
+            if want_mix and _mix_backend() == "transformers":
+                words_hi, _ = _transcribe_mix_transformers(audio)
+            else:
+                kw = {"model": mix} if (want_mix and mix) else {}
+                words_hi, _ = _transcribe(audio, "hi", prompt="", final=True, **kw)
             candidate = _deloop(_text_from(words_hi, "hi"))
-            text = _pick_better(text, candidate) if text else candidate
+            # Mix models can verbalize digits ("334" -> "3.3 0.4", measured on
+            # Apex): if the healthy primary heard a multi-digit number the
+            # candidate lost, the facts axis (20 pts, hard 50-cap) outweighs
+            # any meaning gain — keep the primary.
+            if want_mix and text and not bad and _drops_numbers(text, candidate):
+                pass
+            elif text:
+                text = _pick_better(text, candidate)
+            else:
+                text = candidate
         except Exception as exc:
             _log_error(f"finalize/hindi-retry (model={(mix or _model_name(True))!r})", exc)
 
@@ -370,11 +385,76 @@ def _model_name(final: bool) -> str:
 def _mix_model() -> str | None:
     """Optional dedicated Hindi/code-switch model for the final's Hindi path.
 
-    Must already be in the active backend's format (a CTranslate2 dir/repo for
-    the ctranslate2 backend, an mlx conversion for mlx) — draft.py routes to it,
-    it does not convert it. Unset means the default final model handles Hindi.
+    With DHWANI_MIX_BACKEND=transformers (the default when the name contains a
+    "/"), any HF whisper fine-tune runs as-is via transformers — torch picks
+    Apple's MPS on the scoring box, CPU elsewhere. With =native, the name must
+    already be in the active backend's format (CTranslate2 dir/repo, or an mlx
+    conversion). Unset means the default final model handles Hindi too.
     """
     return os.environ.get("DHWANI_MIX_MODEL") or None
+
+
+def _mix_backend() -> str:
+    forced = os.environ.get("DHWANI_MIX_BACKEND")
+    if forced:
+        return forced
+    mix = _mix_model()
+    return "transformers" if (mix and "/" in mix) else "native"
+
+
+# --- transformers mix backend — runs any HF whisper fine-tune unconverted. ---
+
+_mix_state: tuple | None = None
+_mix_load_lock = threading.Lock()
+
+
+def _get_mix_transformers(repo: str):
+    global _mix_state
+    with _mix_load_lock:
+        if _mix_state is None or _mix_state[0] != repo:
+            import torch
+            from transformers import AutoProcessor, WhisperForConditionalGeneration
+            use_mps = bool(getattr(torch.backends, "mps", None)
+                           and torch.backends.mps.is_available())
+            device = "mps" if use_mps else "cpu"
+            dtype = torch.float16 if use_mps else torch.float32
+            proc = AutoProcessor.from_pretrained(repo)
+            model = WhisperForConditionalGeneration.from_pretrained(
+                repo, torch_dtype=dtype, low_cpu_mem_usage=True).to(device).eval()
+            _mix_state = (repo, proc, model, device)
+    return _mix_state
+
+
+def _transcribe_mix_transformers(window: bytes):
+    """Whole-buffer decode on the mix model. Returns the same (words, lang)
+    shape as the other backends: one pseudo-word spanning the clip — the final
+    path only needs text. Chunks >30s audio (whisper's encoder window) with the
+    stitched texts concatenated."""
+    import numpy as np
+    import torch
+
+    repo = _mix_model()
+    if not repo:
+        return [], None
+    _, proc, model, device = _get_mix_transformers(repo)
+    pcm = np.frombuffer(window, dtype=np.int16).astype(np.float32) / 32768.0
+    if pcm.size == 0:
+        return [], None
+
+    chunk = 30 * SR
+    texts = []
+    for start in range(0, len(pcm), chunk):
+        piece = pcm[start:start + chunk]
+        if len(piece) < int(0.2 * SR):
+            continue
+        inputs = proc(piece, sampling_rate=SR, return_tensors="pt")
+        feats = inputs["input_features"].to(device=device, dtype=model.dtype)
+        with torch.inference_mode():
+            ids = model.generate(feats, task="transcribe")
+        texts.append(proc.batch_decode(ids, skip_special_tokens=True)[0].strip())
+    text = " ".join(t for t in texts if t).strip()
+    dur = len(window) / BYTES_PER_SEC
+    return ([(text, 0.0, dur)] if text else []), "hi"
 
 
 # mlx-community's repo naming is NOT a clean pattern. Some sizes are published
@@ -432,7 +512,13 @@ def warm_models() -> None:
         return
     names = [_model_name(True), _model_name(False)]
     if _mix_model():
-        names.append(_mix_model())
+        if _mix_backend() == "transformers":
+            try:
+                _get_mix_transformers(_mix_model())   # downloads + loads once
+            except Exception as exc:
+                _log_error(f"warm_models/mix:{_mix_model()} — continuing anyway", exc)
+        else:
+            names.append(_mix_model())
     for name in dict.fromkeys(names):
         try:
             if backend == "mlx":
@@ -961,6 +1047,26 @@ def _normalize_numbers(text: str) -> str:
     text = text.translate(_DEV_DIGITS_T)
     text = _VERSIONISH.sub(lambda m: m.group(0).replace(".", ""), text)
     return _DIGIT_HYPHEN.sub(" ", text)
+
+
+_LATIN = re.compile(r"[A-Za-z]")
+_NUMBER_RX = re.compile(r"\b\d[\d,.:/-]*\b")   # the scorer's own number extractor
+
+
+def _has_latin(text: str) -> bool:
+    return bool(_LATIN.search(text or ""))
+
+
+def _drops_numbers(primary: str, candidate: str) -> bool:
+    """True if the primary transcript contains a multi-digit number token the
+    candidate lost. Both sides are number-normalized first, mirroring what the
+    scorer will see. Single digits are ignored — too noisy to arbitrate on."""
+    prim = {n.replace(",", "") for n in _NUMBER_RX.findall(_normalize_numbers(primary or ""))}
+    prim = {n for n in prim if len(re.sub(r"\D", "", n)) >= 2}
+    if not prim:
+        return False
+    cand = {n.replace(",", "") for n in _NUMBER_RX.findall(_normalize_numbers(candidate or ""))}
+    return not prim.issubset(cand)
 
 
 def _looks_bad(text: str) -> bool:

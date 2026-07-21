@@ -18,8 +18,9 @@ _FLEURS_CACHE = {}
 def _fleurs_row(config: str, split: str, fleurs_id: int):
     key = (config, split)
     if key not in _FLEURS_CACHE:
-        from datasets import load_dataset
+        from datasets import Audio, load_dataset
         ds = load_dataset("google/fleurs", config, split=split)
+        ds = ds.cast_column("audio", Audio(decode=False))  # raw bytes; no torchcodec
         _FLEURS_CACHE[key] = {int(r["id"]): r for r in ds}
     return _FLEURS_CACHE[key].get(fleurs_id)
 
@@ -29,15 +30,24 @@ def fetch_one(clip: dict, out_dir: Path, staged: Path | None) -> str:
     dest = out_dir / f"{clip['clip_id']}.wav"
     if dest.exists():
         return "cached"
-    # 1) FLEURS via HuggingFace (fully reproducible by id)
+    # 1) FLEURS via HuggingFace (fully reproducible by id). datasets>=5 needs
+    #    torchcodec to DECODE audio; reading the raw bytes (decode=False) and
+    #    converting with soundfile avoids that — FLEURS ships float32 WAVs,
+    #    which also defeats the stdlib wave module, so go through soundfile.
     if ref.get("repo") == "google/fleurs":
         try:
+            import io
+            import numpy as np
             import soundfile as sf
             fid = int(str(ref["id"]).rsplit("_", 1)[-1])  # fleurs_en_us_test_1904 -> 1904
             row = _fleurs_row(ref["config"], ref["split"], fid)
             if not row:
                 return "missing(fleurs id not found)"
-            sf.write(str(dest), row["audio"]["array"], row["audio"]["sampling_rate"])
+            data, sr = sf.read(io.BytesIO(row["audio"]["bytes"]), dtype="float32")
+            if data.ndim > 1:
+                data = data.mean(axis=1)
+            pcm = (np.clip(data, -1, 1) * 32767).astype(np.int16)
+            sf.write(str(dest), pcm, sr, subtype="PCM_16")
             return "fleurs"
         except Exception as e:  # noqa: BLE001
             return f"error(fleurs:{type(e).__name__})"
