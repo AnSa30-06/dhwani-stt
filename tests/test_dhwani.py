@@ -46,9 +46,10 @@ def make_fake(record: list | None = None, raw_lang: str = "hi"):
 
 @pytest.fixture()
 def engine(monkeypatch):
-    """Fresh engine state, fake transcriber, forced language (no detect calls)."""
+    """Fresh engine state, fake transcriber, forced language (no detect calls).
+    The mix model is disabled ("" — it defaults ON) so no real model loads."""
     monkeypatch.setenv("DHWANI_LANG", "hi")
-    monkeypatch.delenv("DHWANI_MIX_MODEL", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "")
     monkeypatch.delenv("DHWANI_SPECULATE", raising=False)
     monkeypatch.setattr(D, "_transcribe", make_fake())
     D.draft_reset()
@@ -207,20 +208,43 @@ def make_fake_devanagari(record=None):
     return fake
 
 
-def test_router_keeps_pure_hindi_off_mix_model(monkeypatch):
-    """Measured: Apex scores 5.6/70 on pure-Devanagari Hindi. A Hindi clip with
-    no Latin in the primary decode must NOT escalate."""
-    record: list = []
+def test_default_mix_model_is_zero_stt(monkeypatch):
+    monkeypatch.delenv("DHWANI_MIX_MODEL", raising=False)
+    assert D._mix_model() == "shunyalabs/zero-stt-hinglish"
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "")
+    assert D._mix_model() is None
+
+
+def test_default_gate_escalates_pure_hindi(monkeypatch):
+    """Default gate is 'indic': even a pure-Devanagari primary escalates —
+    measured safe because zero-stt ties the default model on pure Hindi."""
     monkeypatch.delenv("DHWANI_LANG", raising=False)
     monkeypatch.setenv("DHWANI_MIX_MODEL", "someone/mix-model")
-    monkeypatch.setattr(D, "_transcribe", make_fake_devanagari(record))
+    monkeypatch.delenv("DHWANI_MIX_GATE", raising=False)
+    monkeypatch.setattr(D, "_transcribe", make_fake_devanagari())
+    called = []
+    monkeypatch.setattr(
+        D, "_transcribe_mix_transformers",
+        lambda window: (called.append(1) or [(" शब्द0 शब्द1 extra", 0.0, 2.0)], "hi"))
+    D.draft_reset()
+    D._final_decode(speech(2.0))
+    assert called, "default gate should escalate Hindi-detected clips"
+
+
+def test_codeswitch_gate_keeps_pure_hindi_off_mix_model(monkeypatch):
+    """DHWANI_MIX_GATE=codeswitch: a pure-Devanagari primary must NOT escalate
+    (the Apex-style protection; Apex measured 5.6/70 on pure Hindi)."""
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "someone/mix-model")
+    monkeypatch.setenv("DHWANI_MIX_GATE", "codeswitch")
+    monkeypatch.setattr(D, "_transcribe", make_fake_devanagari())
     called = []
     monkeypatch.setattr(D, "_transcribe_mix_transformers",
                         lambda window: (called.append(1) or [(" x", 0.0, 1.0)], "hi"))
     D.draft_reset()
 
     text = D._final_decode(speech(2.0))
-    assert not called, "pure-Devanagari clip escalated to the mix model"
+    assert not called, "pure-Devanagari clip escalated despite codeswitch gate"
     assert "शब्द" in text
 
 

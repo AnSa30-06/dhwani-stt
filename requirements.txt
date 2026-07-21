@@ -3,6 +3,11 @@ faster-whisper>=1.0        # or whisper.cpp bindings, parakeet (nemo/onnx), qwen
 # dhwani solution: Apple-GPU backend, auto-selected when importable (solution/draft.py).
 # On non-Apple machines the solution falls back to faster-whisper above.
 mlx-whisper>=0.4 ; sys_platform == "darwin" and platform_machine == "arm64"
+# dhwani solution: the Hindi/code-switch mix model (shunyalabs/zero-stt-hinglish)
+# runs via transformers — torch uses Apple MPS on the scoring box. Without these
+# installed the engine still runs; Hindi finals just stay on the default model.
+torch ; sys_platform == "darwin" and platform_machine == "arm64"
+transformers ; sys_platform == "darwin" and platform_machine == "arm64"
 # Corpus audio fetch (used by scripts/fetch_audio.py on the Action, not at scoring time):
 datasets>=2.18
 soundfile>=0.12

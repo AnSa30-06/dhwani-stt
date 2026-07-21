@@ -36,9 +36,14 @@ Environment:
     DHWANI_BACKEND       auto | mlx | ctranslate2          (default: auto)
     DHWANI_MODEL         model size/repo for the final      (default: large-v3-turbo)
     DHWANI_DRAFT_MODEL   cheaper size/repo for partials     (default: small)
-    DHWANI_MIX_MODEL     optional Hindi/code-switch model for the final's
-                         Hindi path (full repo id or local path, already in the
-                         active backend's format). Unset = use DHWANI_MODEL.
+    DHWANI_MIX_MODEL     Hindi/code-switch model for the final's Hindi path
+                         (default: shunyalabs/zero-stt-hinglish, measured best
+                         on Hinglish and tied with turbo on pure Hindi).
+                         "" disables; any HF whisper fine-tune id works.
+    DHWANI_MIX_GATE      indic (default: escalate every Hindi-detected clip)
+                         | codeswitch (require Latin letters in the primary)
+    DHWANI_MIX_BACKEND   transformers | native (default: transformers when the
+                         model id contains "/")
     DHWANI_SPECULATE     0 to disable speculative finalization (default: ON)
     DHWANI_DEVICE        cpu | cuda | auto (ctranslate2 only)
     DHWANI_ORTHOGRAPHY   0 to disable the corpus adapter   (default: ON — the
@@ -229,7 +234,15 @@ def _final_decode(audio: bytes) -> str:
         or _looks_bad(text)
         or (raw not in ("en", "hi") and raw is not None)
     )
-    want_mix = mix is not None and raw in _INDIC and (bad or _has_latin(text))
+    # Gate: "indic" (default) escalates every Hindi-detected clip — measured
+    # safe because zero-stt ties the default model on pure Hindi. "codeswitch"
+    # additionally requires Latin letters in the primary; use it for a mix
+    # model that (like Apex) collapses on pure-Devanagari audio. NB the
+    # codeswitch signal is weak: whisper often writes Hinglish clips entirely
+    # in Devanagari, so true code-switch clips can look Latin-free here.
+    gate = os.environ.get("DHWANI_MIX_GATE", "indic")
+    want_mix = (mix is not None and raw in _INDIC
+                and (bad or gate != "codeswitch" or _has_latin(text)))
     if not forced and (bad or want_mix):
         try:
             if want_mix and _mix_backend() == "transformers":
@@ -382,16 +395,28 @@ def _model_name(final: bool) -> str:
     return os.environ.get("DHWANI_DRAFT_MODEL", "small")
 
 
+# Chosen by measurement (2026-07-22, 15 local clips, quality axis of the real
+# scorer): zero-stt beat turbo 58.78 vs 37.36 on Hinglish, TIED it on pure
+# Hindi (51.36 vs 51.30) — so escalating every Hindi-detected clip is free —
+# and outputs native mixed script, so it scores against the PRIMARY gold with
+# no dependence on romanized gold_alternatives. Apex (Apache-2.0) measured
+# 55.79 Hinglish but 5.60 pure-Hindi: usable via env override, never default.
+DEFAULT_MIX_MODEL = "shunyalabs/zero-stt-hinglish"
+
+
 def _mix_model() -> str | None:
-    """Optional dedicated Hindi/code-switch model for the final's Hindi path.
+    """Dedicated Hindi/code-switch model for the final's Hindi path.
 
     With DHWANI_MIX_BACKEND=transformers (the default when the name contains a
     "/"), any HF whisper fine-tune runs as-is via transformers — torch picks
     Apple's MPS on the scoring box, CPU elsewhere. With =native, the name must
     already be in the active backend's format (CTranslate2 dir/repo, or an mlx
-    conversion). Unset means the default final model handles Hindi too.
+    conversion). DHWANI_MIX_MODEL="" disables the mix path entirely.
     """
-    return os.environ.get("DHWANI_MIX_MODEL") or None
+    value = os.environ.get("DHWANI_MIX_MODEL")
+    if value is None:
+        value = DEFAULT_MIX_MODEL
+    return value or None
 
 
 def _mix_backend() -> str:

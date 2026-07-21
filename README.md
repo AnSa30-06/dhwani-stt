@@ -1,5 +1,35 @@
 # builderr · Dual-Language Speech-to-Text Challenge
 
+> ## This fork: the **dhwani** entry (streaming track)
+>
+> Everything of ours lives in `solution/draft.py` (+ `solution/orthography.py`,
+> `solution/speechanalyzer/`); the harness files are untouched. Design in one
+> line: **the scored final is a fresh whole-buffer decode that starts
+> speculatively during the speaker's trailing silence** (≈full latency points,
+> zero quality risk), with a **language router** — English/default finals on
+> `large-v3-turbo` (mlx on Apple silicon), Hindi/code-switched finals
+> re-decoded on `shunyalabs/zero-stt-hinglish` via transformers (MPS on the
+> scoring box), better candidate kept, with a number-preservation guard.
+>
+> **Before official (offline) scoring, pre-cache the models once, online:**
+>
+> ```bash
+> pip install -r requirements.txt -r requirements-streaming.txt
+> python -c "from solution.draft import warm_models; warm_models()"
+> ```
+>
+> The official server runs with `HF_HUB_OFFLINE=1` inside sandbox-exec, so
+> models must already be in the HF cache; `warm_models()` fetches exactly the
+> configured set (~3.5 GB). Zero-config defaults ARE the submission
+> configuration; env knobs are documented at the top of `solution/draft.py`.
+> Solution tests: `python -m pytest tests/test_dhwani.py`.
+>
+> Models + licenses: OpenAI whisper `large-v3-turbo` + `small` (MIT, via
+> mlx-community / Systran conversions) · `shunyalabs/zero-stt-hinglish`
+> (OpenRAIL). Measured on 15 local clips (quality axis, scored with this
+> repo's own scorer): zero-stt **58.8/70 on Hinglish** vs turbo's 37.4, tie on
+> pure Hindi (51.4 / 51.3); English stays on turbo (53.3).
+
 **Build a speech-to-text tool that runs on your own laptop, works offline, and actually
 understands when people mix Hindi and English.** Win **$500** — and walk away with a
 project genuinely worth putting on GitHub.
