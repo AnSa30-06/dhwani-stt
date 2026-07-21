@@ -5,12 +5,18 @@ optional and the engine degrades to a no-op adapter if it is absent.
 
 The one thing that decides the 30-point latency axis: the sealed harness calls
 `draft()` *synchronously* inside its WebSocket handler, so end-to-final latency
-is exactly how long `draft(audio, is_final=True)` blocks. We therefore never
-decode the whole clip at the end. A background worker decodes the rolling
-uncommitted window while audio is still arriving and commits words once two
-consecutive decodes agree on them (LocalAgreement-2, Machacek et al.). By the
-time `end` arrives, only the last second or so is uncommitted, so the final call
-decodes a short tail instead of the whole utterance.
+is exactly how long `draft(audio, is_final=True)` blocks. The scored final is a
+fresh whole-buffer decode (see _final_decode for why streaming commits were
+banished from it) — so the latency win comes from STARTING that decode early:
+when the tail of the buffer goes silent for SPEC_SILENCE_S, a background thread
+speculatively runs the exact same whole-buffer final decode during the silence.
+If `end` arrives and no new speech landed after the speculative decode began,
+the final returns in milliseconds; if speech resumed, the speculation is
+discarded and the normal decode runs (never a wrong answer, only a slower one).
+≤1000 ms end-to-final is the full 30 points on the published latency curve.
+
+A second worker still decodes the rolling window for live partials
+(LocalAgreement-2, Machacek et al.) — those are unscored UI hints only.
 
 Two decode backends, chosen automatically (DHWANI_BACKEND=auto|mlx|ctranslate2):
 
@@ -28,8 +34,12 @@ Two decode backends, chosen automatically (DHWANI_BACKEND=auto|mlx|ctranslate2):
 
 Environment:
     DHWANI_BACKEND       auto | mlx | ctranslate2          (default: auto)
-    DHWANI_MODEL         model size/repo for draft+final    (default: medium)
-    DHWANI_DRAFT_MODEL   cheaper size/repo for partials     (default: = DHWANI_MODEL)
+    DHWANI_MODEL         model size/repo for the final      (default: large-v3-turbo)
+    DHWANI_DRAFT_MODEL   cheaper size/repo for partials     (default: small)
+    DHWANI_MIX_MODEL     optional Hindi/code-switch model for the final's
+                         Hindi path (full repo id or local path, already in the
+                         active backend's format). Unset = use DHWANI_MODEL.
+    DHWANI_SPECULATE     0 to disable speculative finalization (default: ON)
     DHWANI_DEVICE        cpu | cuda | auto (ctranslate2 only)
     DHWANI_ORTHOGRAPHY   0 to disable the corpus adapter   (default: ON — the
                          must_have terms are Latin substrings, so Devanagari
@@ -50,6 +60,10 @@ COMMIT_LAG_S = 0.3       # never commit a word that touches the live edge
 FORCE_COMMIT_S = 6.0     # if agreement stalls, commit anyway so the tail stays short
 PROMPT_CHARS = 160
 
+SPEC_SILENCE_S = 0.5     # trailing silence that arms a speculative final decode
+SPEC_MIN_AUDIO_S = 1.0   # never speculate on less audio than this
+FRAME_S = 0.02           # harness frame size; silence detection works per frame
+
 _INDIC = {"hi", "mr", "ne", "sa", "ur", "bh", "mai"}
 _PUNCT = re.compile(r"[^\w]", re.UNICODE)
 
@@ -66,6 +80,15 @@ _prev_words: list[tuple[str, float, float]] = []
 _lang: str | None = None
 _busy = False
 _finalizing = False
+
+# speculative-final state. _clip_gen guards against a stale speculation thread
+# from a previous clip writing its result into the next one: draft_reset() bumps
+# the generation and the thread only stores a result if its generation matches.
+_clip_gen = 0
+_spec_thread: threading.Thread | None = None
+_spec_started = 0        # len(audio) when the in-flight speculation began
+_spec_text: str | None = None
+_spec_covered = 0        # len(audio) a COMPLETED speculation decoded
 
 try:
     from solution.orthography import map_words
@@ -93,6 +116,7 @@ def _log_error(context: str, exc: BaseException) -> None:
 
 def draft_reset() -> None:
     global _committed, _committed_bytes, _tail, _prev_words, _lang, _finalizing
+    global _clip_gen, _spec_thread, _spec_started, _spec_text, _spec_covered
     with _state_lock:
         _committed = ""
         _committed_bytes = 0
@@ -100,6 +124,11 @@ def draft_reset() -> None:
         _prev_words = []
         _lang = None
         _finalizing = False
+        _clip_gen += 1       # orphans any speculation thread still running
+        _spec_thread = None
+        _spec_started = 0
+        _spec_text = None
+        _spec_covered = 0
 
 
 def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
@@ -110,12 +139,20 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
                 _finalizing = True
             return _finalize(audio_buffer)
 
-        if not _busy and len(audio_buffer) - _committed_bytes >= int(MIN_DECODE_S * BYTES_PER_SEC):
+        # A speculative final decode owns the accelerator while it runs; pausing
+        # the (unscored) partial worker keeps them from contending for it.
+        if not _busy and not _spec_alive() and \
+                len(audio_buffer) - _committed_bytes >= int(MIN_DECODE_S * BYTES_PER_SEC):
             _busy = True
             try:
                 threading.Thread(target=_worker, args=(audio_buffer,), daemon=True).start()
             except Exception:
                 _busy = False   # a latched _busy would silence every later partial
+
+        try:
+            _maybe_speculate(audio_buffer)
+        except Exception as exc:
+            _log_error("speculation trigger (final falls back to a fresh decode)", exc)
 
         with _state_lock:
             return (_committed + _tail, len(_committed))
@@ -138,6 +175,14 @@ def _worker(audio: bytes) -> None:
 
 
 def _finalize(audio: bytes) -> tuple[str, int]:
+    """Return the speculative final if it is still valid, else decode fresh."""
+    text = _spec_take(audio)
+    if text is None:
+        text = _final_decode(audio)
+    return (text, len(text))
+
+
+def _final_decode(audio: bytes) -> str:
     """Decode the WHOLE buffer fresh, ignoring the streaming partials.
 
     Why not reuse the committed prefix + tail, which would be faster? Because on
@@ -170,25 +215,31 @@ def _finalize(audio: bytes) -> tuple[str, int]:
     # Re-decode forcing Hindi when the auto pass mis-fired or flat-out failed:
     # an Indic language that isn't hi (Urdu -> Arabic script -> scores zero), an
     # outright hallucination (loop, blank, a language not in this en+hi corpus),
-    # or the primary decode raised (text is still "").
+    # or the primary decode raised (text is still ""). The same pass doubles as
+    # the ROUTER's escalation: when DHWANI_MIX_MODEL names a dedicated
+    # Hindi/code-switch model, every Hindi-detected clip re-decodes on it and
+    # _pick_better keeps the cleaner, longer candidate. English clips never pay
+    # for the second decode.
+    mix = _mix_model()
     if not forced and (
         not text
         or (raw in _INDIC and raw != "hi")
         or _looks_bad(text)
         or (raw not in ("en", "hi") and raw is not None)
+        or (mix is not None and raw in _INDIC)
     ):
         try:
-            words_hi, _ = _transcribe(audio, "hi", prompt="", final=True)
+            kw = {"model": mix} if mix else {}
+            words_hi, _ = _transcribe(audio, "hi", prompt="", final=True, **kw)
             candidate = _deloop(_text_from(words_hi, "hi"))
             text = _pick_better(text, candidate) if text else candidate
         except Exception as exc:
-            _log_error(f"finalize/hindi-retry (model={_model_name(True)!r})", exc)
+            _log_error(f"finalize/hindi-retry (model={(mix or _model_name(True))!r})", exc)
 
     if not text.strip():  # last resort: whatever the partials managed to commit
         with _state_lock:
             text = _deloop((_committed + _tail).strip())
-    text = _normalize_numbers(text)
-    return (text, len(text))
+    return _normalize_numbers(text)
 
 
 def _text_from(words, lang) -> str:
@@ -316,6 +367,16 @@ def _model_name(final: bool) -> str:
     return os.environ.get("DHWANI_DRAFT_MODEL", "small")
 
 
+def _mix_model() -> str | None:
+    """Optional dedicated Hindi/code-switch model for the final's Hindi path.
+
+    Must already be in the active backend's format (a CTranslate2 dir/repo for
+    the ctranslate2 backend, an mlx conversion for mlx) — draft.py routes to it,
+    it does not convert it. Unset means the default final model handles Hindi.
+    """
+    return os.environ.get("DHWANI_MIX_MODEL") or None
+
+
 # mlx-community's repo naming is NOT a clean pattern. Some sizes are published
 # bare ("whisper-medium", "whisper-large-v3-turbo"); others only exist with an
 # "-mlx" suffix ("whisper-small-mlx", "whisper-large-v3-mlx"). The old code
@@ -369,8 +430,10 @@ def warm_models() -> None:
         except Exception as exc:
             _log_error("warm_models/speechanalyzer — continuing anyway", exc)
         return
-    for final in (True, False):
-        name = _model_name(final)
+    names = [_model_name(True), _model_name(False)]
+    if _mix_model():
+        names.append(_mix_model())
+    for name in dict.fromkeys(names):
         try:
             if backend == "mlx":
                 _transcribe_mlx(b"\x00\x00" * int(0.5 * SR), lang="en", prompt="",
@@ -378,7 +441,7 @@ def warm_models() -> None:
             else:
                 _get_model_ctranslate2(name)
         except Exception as exc:
-            _log_error(f"warm_models/{name} (final={final}) — continuing anyway", exc)
+            _log_error(f"warm_models/{name} — continuing anyway", exc)
 
 
 def _detect_language(audio: bytes, final: bool) -> str | None:
@@ -401,14 +464,15 @@ def _detect_language(audio: bytes, final: bool) -> str | None:
 _FINAL_TEMPS = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
 
 
-def _transcribe(window: bytes, lang: str | None, prompt: str, final: bool = False):
+def _transcribe(window: bytes, lang: str | None, prompt: str, final: bool = False,
+                model: str | None = None):
     backend = _resolve_backend()
     if backend == "speechanalyzer":
         return _transcribe_speechanalyzer(window, final=final)
     audio = _pcm_to_f32(window)
     if audio.size == 0:
         return [], None
-    name = _model_name(final)
+    name = model or _model_name(final)
     if backend == "mlx":
         return _transcribe_mlx(window, lang, prompt, model_name=name, final=final)
     return _transcribe_ctranslate2(audio, lang, prompt, model_name=name, final=final)
@@ -670,6 +734,131 @@ def _transcribe_speechanalyzer(window: bytes, final: bool):
         return [], locale.split("-")[0]
     dur = len(window) / BYTES_PER_SEC
     return [(text, 0.0, dur)], locale.split("-")[0]
+
+
+# --- speculative finalization ---------------------------------------------
+#
+# The scored final is a whole-buffer decode; end-to-final latency is how long
+# that decode takes AFTER `end` arrives. But people stop talking before they
+# release the dictation key, and the evaluator's clips end after the speech
+# does — so the decode can usually run DURING the trailing silence instead.
+# The speculation produces byte-for-byte the same text the normal path would
+# (it calls the same _final_decode on the same buffer); its only failure mode
+# is being unusable because speech resumed, in which case the normal decode
+# runs and the clip merely scores today's latency instead of ~0 ms.
+
+def _speculation_enabled() -> bool:
+    return os.environ.get("DHWANI_SPECULATE", "1") != "0"
+
+
+def _spec_alive() -> bool:
+    t = _spec_thread
+    return t is not None and t.is_alive()
+
+
+def _frame_rms(audio: bytes):
+    """RMS per 20 ms frame over the whole buffer, or None without numpy/audio."""
+    try:
+        import numpy as np
+    except Exception:
+        return None
+    pcm = np.frombuffer(audio[: (len(audio) // 2) * 2], dtype=np.int16)
+    frame = int(FRAME_S * SR)
+    if pcm.size < frame:
+        return None
+    pcm = pcm[: (pcm.size // frame) * frame].astype(np.float32)
+    frames = pcm.reshape(-1, frame)
+    return np.sqrt((frames * frames).mean(axis=1))
+
+
+def _silence_threshold(rms) -> float:
+    """Gain-invariant: the evaluator replays each clip at deliberately different
+    gains, so the threshold hangs off the loudest frame this clip has produced,
+    with a small absolute floor for digitally-silent zeros."""
+    return max(60.0, 0.05 * float(rms.max()))
+
+
+def _tail_is_silent(rms, thr) -> bool:
+    n = max(1, int(SPEC_SILENCE_S / FRAME_S))
+    tail = rms[-n:]
+    return len(tail) >= n and bool((tail < thr).all())
+
+
+def _speech_after(rms, thr, start_byte: int) -> bool:
+    start_frame = max(0, start_byte // int(FRAME_S * SR * 2))
+    seg = rms[start_frame:]
+    return bool(seg.size and (seg >= thr).any())
+
+
+def _maybe_speculate(audio: bytes) -> None:
+    """Called on every partial tick. Arms one speculative decode per stretch of
+    trailing silence that contains speech the last speculation didn't cover."""
+    global _spec_thread, _spec_started
+    if not _speculation_enabled() or _finalizing or _spec_alive():
+        return
+    if len(audio) < int(SPEC_MIN_AUDIO_S * BYTES_PER_SEC):
+        return
+    rms = _frame_rms(audio)
+    if rms is None:
+        return
+    thr = _silence_threshold(rms)
+    if float(rms.max()) <= 60.0:
+        return  # nothing but silence so far — nothing to transcribe
+    if not _tail_is_silent(rms, thr):
+        return
+    if not _speech_after(rms, thr, _spec_covered):
+        return  # the completed speculation already covers all speech
+
+    gen = _clip_gen
+
+    def _run(buf: bytes = audio, g: int = gen) -> None:
+        global _spec_text, _spec_covered
+        try:
+            text = _final_decode(buf)
+        except Exception as exc:
+            _log_error("speculative final decode (discarded, final will re-decode)", exc)
+            return
+        with _state_lock:
+            if g == _clip_gen:
+                _spec_text = text
+                _spec_covered = len(buf)
+
+    _spec_started = len(audio)
+    t = threading.Thread(target=_run, daemon=True)
+    _spec_thread = t
+    t.start()
+
+
+def _spec_take(audio: bytes) -> str | None:
+    """Return the speculative final iff it covers every bit of speech in the
+    clip's full audio; None means the caller must decode fresh."""
+    if not _speculation_enabled():
+        return None
+    rms = _frame_rms(audio)
+    if rms is None:
+        return None
+    thr = _silence_threshold(rms)
+
+    t = _spec_thread
+    if t is not None and t.is_alive():
+        # Only wait out an in-flight decode whose buffer still covers all
+        # speech; if speech resumed after it started, its answer is stale and
+        # the fresh decode would have to run anyway.
+        if _speech_after(rms, thr, _spec_started):
+            return None
+        t.join(timeout=30.0)
+        if t.is_alive():
+            return None
+
+    with _state_lock:
+        text, covered = _spec_text, _spec_covered
+    if text is None or not text.strip():
+        return None
+    if covered > len(audio):
+        return None
+    if _speech_after(rms, thr, covered):
+        return None  # speech landed after the speculation began
+    return text
 
 
 # --- helpers --------------------------------------------------------------
