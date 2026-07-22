@@ -1,0 +1,368 @@
+{
+ "turbo": {
+  "clips": [
+   {
+    "points": 63.75,
+    "meaning": 0.875,
+    "wer": 0.125,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_en_us_test_1674",
+    "category": "fleurs_english",
+    "pred": "In some areas boiling water for a minute is enough and other several minutes are needed.",
+    "decode_s": 28.4
+   },
+   {
+    "points": 35.0,
+    "meaning": 0.867,
+    "wer": 0.133,
+    "flipped": true,
+    "reasons": [
+     "required term missing"
+    ],
+    "clip_id": "fleurs_en_us_test_1728",
+    "category": "fleurs_english",
+    "pred": "The cabbage juice changes colors depending on how acidic or basic acolyte the chemical is.",
+    "decode_s": 28.5
+   },
+   {
+    "points": 70.0,
+    "meaning": 1.0,
+    "wer": 0.0,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_en_us_test_1802",
+    "category": "fleurs_english",
+    "pred": "The internet combines elements of both mass and interpersonal communication.",
+    "decode_s": 28.7
+   },
+   {
+    "points": 67.37,
+    "meaning": 0.947,
+    "wer": 0.053,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_en_us_test_1904",
+    "category": "fleurs_english",
+    "pred": "However, due to the slow communication channels, styles in the West could lag behind by 25 to 30 years.",
+    "decode_s": 30.9
+   },
+   {
+    "points": 66.67,
+    "meaning": 0.933,
+    "wer": 0.091,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_en_us_test_1952",
+    "category": "fleurs_english",
+    "pred": "Anyone who is going to drive at high latitudes or over mountain passes should consider the possibility of snow, ice, or freezing temperatures.",
+    "decode_s": 28.6
+   },
+   {
+    "points": 58.89,
+    "meaning": 0.778,
+    "wer": 0.269,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_hi_in_test_1666",
+    "category": "fleurs_hindi",
+    "pred": "अपनी सरकार के अलावा आप अन्य देशों की सरकारों की सला ले सकते हैं हाला कि उनकी सला उनके नागरिकों को ध्यान में रख कर दी जाती है",
+    "decode_s": 31.7
+   },
+   {
+    "points": 35.0,
+    "meaning": 0.724,
+    "wer": 0.276,
+    "flipped": true,
+    "reasons": [
+     "number changed/dropped"
+    ],
+    "clip_id": "fleurs_hi_in_test_1718",
+    "category": "fleurs_hindi",
+    "pred": "ऐसी कोई वैश्विक परिभाशा नहीं है जिसके लिए निर्मित समान इंटीक होते हैं। कुछ कर एजंसिया सो साल से पुराने समान को इंटीक के तौर पर परभाशित करती हैं।",
+    "decode_s": 34.2
+   },
+   {
+    "points": 49.63,
+    "meaning": 0.593,
+    "wer": 0.583,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_hi_in_test_1778",
+    "category": "fleurs_hindi",
+    "pred": "टेरी वेजन रिपोर्टों के में प्लांट में निकालने जाने वाला सफेद दुवा दिखाया गया है।",
+    "decode_s": 30.8
+   },
+   {
+    "points": 52.56,
+    "meaning": 0.651,
+    "wer": 0.429,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_hi_in_test_1827",
+    "category": "fleurs_hindi",
+    "pred": "सबसे नजदी की शिरे पर क्रिस्ट की मोटाई करीब 70 किलो मीटर और सबसे दूर के सिरे पर 100 किलो मीटर है",
+    "decode_s": 30.1
+   },
+   {
+    "points": 60.43,
+    "meaning": 0.809,
+    "wer": 0.217,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_hi_in_test_1981",
+    "category": "fleurs_hindi",
+    "pred": "यदि आप केवल शिप बोर्ड ब्रमन का उपयोग करके किनारे तक जाते हैं तो आपको एक अलग वीजा की अवशकता नहीं होगी 2009 तक",
+    "decode_s": 30.1
+   },
+   {
+    "points": 35.0,
+    "meaning": 0.905,
+    "wer": 0.095,
+    "flipped": true,
+    "reasons": [
+     "required term missing"
+    ],
+    "clip_id": "fleurs_en_us_test_1675",
+    "category": "fleurs_english",
+    "pred": "All nouns alongside the words say for you always begin with a capital letter, even in the middle of a sentence.",
+    "decode_s": 28.5
+   },
+   {
+    "points": 35.0,
+    "meaning": 0.939,
+    "wer": 0.061,
+    "flipped": true,
+    "reasons": [
+     "required term missing"
+    ],
+    "clip_id": "fleurs_en_us_test_1950",
+    "category": "fleurs_english",
+    "pred": "To the north and within easy reach is the romantic and fascinating town of Cintra and which was made famous to foreigners after a glowing account of its splendorous recorded by Lord Byron.",
+    "decode_s": 28.8
+   },
+   {
+    "points": 26.32,
+    "meaning": 0.526,
+    "wer": 0.474,
+    "flipped": true,
+    "reasons": [
+     "required term missing"
+    ],
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0000",
+    "category": "openslr104_hinglish",
+    "pred": "लिबर आफिस इंप्रेस में एक प्रस्तुती डॉक्यमिन बनाना और बुन्यादी फॉर्मेटिंग के इस स्पोकेंट टिटोरिल में आपका स्वागत रहाए।",
+    "decode_s": 45.6
+   },
+   {
+    "points": 35.0,
+    "meaning": 0.741,
+    "wer": 0.259,
+    "flipped": true,
+    "reasons": [
+     "required term missing"
+    ],
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0001",
+    "category": "openslr104_hinglish",
+    "pred": "इस टीटूरल में हम इंप्रेस विंडो के भागों के बारे में सीखेंगे और कैसे स्लाइड इंसर्ट करें और कॉपी करें फॉर्ट तथा फॉर्ट को फॉर्मैट करना सीखेंगे",
+    "decode_s": 30.5
+   },
+   {
+    "points": 50.77,
+    "meaning": 0.615,
+    "wer": 0.421,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0002",
+    "category": "openslr104_hinglish",
+    "pred": "यहां हम अपने और्परेटिंग सिस्टेम के रूप में जेन्यू लिनक्स और लिबर आफिस वर्जन 334 का उप्योग कर रहे हैं",
+    "decode_s": 45.5
+   }
+  ]
+ },
+ "zerostt": {
+  "clips": [
+   {
+    "points": 3.45,
+    "meaning": 0.069,
+    "wer": 0.938,
+    "flipped": true,
+    "reasons": [
+     "required term missing",
+     "unrelated (WER 0.94)"
+    ],
+    "clip_id": "fleurs_en_us_test_1674",
+    "category": "fleurs_english",
+    "pred": "En algunes zones, boigar water per minuts és prou i altres minuts serveixen.",
+    "decode_s": 21.1
+   },
+   {
+    "points": 0.0,
+    "meaning": 0.0,
+    "wer": 1.0,
+    "flipped": true,
+    "reasons": [
+     "required term missing",
+     "unrelated (WER 1.00)"
+    ],
+    "clip_id": "fleurs_en_us_test_1728",
+    "category": "fleurs_english",
+    "pred": "धे आपकाल जुस जेज़ आपकाल आ",
+    "decode_s": 99.0
+   },
+   {
+    "points": 0.0,
+    "meaning": 0.0,
+    "wer": 1.0,
+    "flipped": true,
+    "reasons": [
+     "required term missing",
+     "unrelated (WER 1.00)"
+    ],
+    "clip_id": "fleurs_en_us_test_1802",
+    "category": "fleurs_english",
+    "pred": "आर्डिकार आर्",
+    "decode_s": 101.2
+   },
+   {
+    "points": 5.88,
+    "meaning": 0.118,
+    "wer": 0.947,
+    "flipped": true,
+    "reasons": [
+     "required term missing",
+     "unrelated (WER 0.95)"
+    ],
+    "clip_id": "fleurs_en_us_test_1904",
+    "category": "fleurs_english",
+    "pred": "हाववर दूटो तो तो सलोड क्यूमिनिकेशन काएटिंग आजारी 25 तो 30 आजारी आजारी 25 आज",
+    "decode_s": 101.6
+   },
+   {
+    "points": 66.67,
+    "meaning": 0.933,
+    "wer": 0.091,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_en_us_test_1952",
+    "category": "fleurs_english",
+    "pred": "Anyone who is going to drive at high latitudes or over mountain passes should consider the possibility of snow, ice, or freezing temperatures.",
+    "decode_s": 22.4
+   },
+   {
+    "points": 57.74,
+    "meaning": 0.755,
+    "wer": 0.269,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_hi_in_test_1666",
+    "category": "fleurs_hindi",
+    "pred": "अपनी सरकार के एलावा आप अन्य देशों की सरकारों की सला ले सकते हैं हाला कि उनकी सला उनके नागरिकों को ध्यान में रगकर दी जाती है",
+    "decode_s": 38.2
+   },
+   {
+    "points": 52.2,
+    "meaning": 0.644,
+    "wer": 0.379,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_hi_in_test_1718",
+    "category": "fleurs_hindi",
+    "pred": "ऐसी कोई वैश्विक परिभाशा नहीं है जिसके लिए निर्मित समान antique होते हैं कुछ car agency आ 100 साल से पूराने समान को antique के तोर पर परभाशित करती हैं",
+    "decode_s": 38.7
+   },
+   {
+    "points": 36.0,
+    "meaning": 0.32,
+    "wer": 0.75,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_hi_in_test_1778",
+    "category": "fleurs_hindi",
+    "pred": "terrivision reports में plant में निकालने जाने वाल्य सफेत दूगा दिखाया गया है",
+    "decode_s": 27.1
+   },
+   {
+    "points": 51.71,
+    "meaning": 0.634,
+    "wer": 0.429,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_hi_in_test_1827",
+    "category": "fleurs_hindi",
+    "pred": "सबसे नजडी की सीरय पर क्रिस्ट की मोटाई करीब 70 km और सबसे दूर के सीरय पर 100 km है",
+    "decode_s": 30.0
+   },
+   {
+    "points": 59.13,
+    "meaning": 0.783,
+    "wer": 0.217,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_hi_in_test_1981",
+    "category": "fleurs_hindi",
+    "pred": "यदि आप केवल shipboard ब्रमण का उपयोग करके किनारे तक जाते हैं तो आपको एक अलग वीजा की अवश्यकता नहीं होगे 2009 तक",
+    "decode_s": 35.4
+   },
+   {
+    "points": 35.0,
+    "meaning": 0.905,
+    "wer": 0.095,
+    "flipped": true,
+    "reasons": [
+     "required term missing"
+    ],
+    "clip_id": "fleurs_en_us_test_1675",
+    "category": "fleurs_english",
+    "pred": "All nouns alongside the world say for you always begin with a capital letter even in the middle of a sentence.",
+    "decode_s": 21.3
+   },
+   {
+    "points": 35.0,
+    "meaning": 0.97,
+    "wer": 0.03,
+    "flipped": true,
+    "reasons": [
+     "required term missing"
+    ],
+    "clip_id": "fleurs_en_us_test_1950",
+    "category": "fleurs_english",
+    "pred": "To the north and within easy reach is the romantic and fascinating town of Sintra and which was made famous to foreigners after a glowing account of its splendorous recorded by Lord Byron.",
+    "decode_s": 23.6
+   },
+   {
+    "points": 63.24,
+    "meaning": 0.865,
+    "wer": 0.158,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0000",
+    "category": "openslr104_hinglish",
+    "pred": "LibreOffice Impress में एक प्रस्तुती document बनाना और बुनियादी formatting के इस spoken tutorial में आपका स्वागत है",
+    "decode_s": 29.9
+   },
+   {
+    "points": 58.89,
+    "meaning": 0.778,
+    "wer": 0.222,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0001",
+    "category": "openslr104_hinglish",
+    "pred": "इस tutorial में हम impress window के भागों के बारे में सीखेंगे और कैसे slide insert करें और copy करें font तथा font को format करना सीखेंगे",
+    "decode_s": 31.8
+   },
+   {
+    "points": 54.21,
+    "meaning": 0.684,
+    "wer": 0.368,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0002",
+    "category": "openslr104_hinglish",
+    "pred": "यहाँ हम अपने operating system के रूप में jnulinux और liber office version 334 का उपयोग कर रहे हैं",
+    "decode_s": 27.5
+   }
+  ]
+ }
+}
