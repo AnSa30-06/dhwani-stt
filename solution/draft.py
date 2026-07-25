@@ -45,7 +45,7 @@ Environment:
     DHWANI_MIX_BACKEND   transformers | native (default: transformers when the
                          model id contains "/")
     DHWANI_SPECULATE     0 to disable speculative finalization (default: ON)
-    DHWANI_CHUNK_S       seconds; on clips longer than this the final is built
+    DHWANI_CHUNK_S       seconds; on clips LONGER than this the final is built
                          from committed windows so the end-of-clip decode only
                          processes the last window, not the whole buffer
                          (default: 24; 0 restores the pure whole-buffer final)
