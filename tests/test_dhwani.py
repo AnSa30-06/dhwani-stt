@@ -276,3 +276,174 @@ def test_drops_numbers_helper():
     assert not D._drops_numbers("le lo 5 cheezen", "le lo paanch cheezen")
     # the guard sees number-normalized text: 3.3.4 == 334
     assert not D._drops_numbers("version 334", "version 3.3.4")
+
+
+# --- chunked final (bounded end-of-clip latency on long clips) -------------
+
+_MARK_OFFSET = 4000   # keeps amplitude well above the silence floor while still
+                      # letting a window's samples name the seconds they cover
+
+
+def marked(seconds: int) -> bytes:
+    """PCM where every sample in second k holds a loud, distinct value, so a
+    decoder can read a window's byte-slice and name exactly which seconds it spans."""
+    n = seconds * D.SR
+    return (np.arange(n) // D.SR + 1 + _MARK_OFFSET).astype(np.int16).tobytes()
+
+
+def marked_fake(record: list | None = None, cost_per_s: float = 0.02,
+                raw_lang: str = "en"):
+    def fake(window, lang, prompt, final=False, model=None):
+        pcm = np.frombuffer(window, dtype=np.int16)
+        if final and cost_per_s:
+            time.sleep(len(window) / BPS * cost_per_s)   # decode cost ~ length
+        vals = [v for v in np.unique(pcm) if v > _MARK_OFFSET]   # skip silence (zeros)
+        words = [(f" s{int(v) - _MARK_OFFSET}", float(i), float(i) + 0.4)
+                 for i, v in enumerate(vals)]
+        if record is not None:
+            record.append({"nbytes": len(window), "final": final, "nwords": len(words)})
+        return words, raw_lang
+    return fake
+
+
+def drain_committers(audio: bytes, timeout_s: float = 15.0) -> None:
+    """Keep ticking draft() until every closeable window has been committed and
+    no committer is in flight (mimics the server's steady partial cadence)."""
+    deadline = time.monotonic() + timeout_s
+    stable, last = 0, -1
+    while time.monotonic() < deadline:
+        D.draft(audio, False)
+        with D._state_lock:
+            fb, busy = D._fc_bytes, D._fc_busy
+        if not busy and fb == last:
+            stable += 1
+            if stable >= 3:
+                return
+        else:
+            stable, last = 0, fb
+        time.sleep(0.05)
+
+
+@pytest.fixture()
+def chunk_engine(monkeypatch):
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "")
+    monkeypatch.setenv("DHWANI_SPECULATE", "0")   # isolate chunking from speculation
+    monkeypatch.setattr(D, "_transcribe", marked_fake())
+    D.draft_reset()
+    yield D
+    D.draft_reset()
+
+
+def test_committer_runs_and_leaves_a_bounded_tail(chunk_engine):
+    audio = marked(90)
+    feed_partials(audio)
+    drain_committers(audio)
+    with D._state_lock:
+        fc_bytes = D._fc_bytes
+    assert 0 < fc_bytes < len(audio), "committer never closed a window, or ate the whole clip"
+    tail_s = (len(audio) - fc_bytes) / BPS
+    assert tail_s <= D._chunk_s() + D.CHUNK_SETTLE_S + 2.0, f"tail is {tail_s:.1f}s, not bounded"
+
+
+def test_final_latency_is_bounded_on_long_clips(chunk_engine):
+    audio = marked(90)
+    feed_partials(audio)
+    drain_committers(audio)
+    t0 = time.monotonic()
+    text, _ = D.draft(audio, True)
+    dt = time.monotonic() - t0
+    # a whole-buffer decode of 90s would cost ~90*0.02 = 1.8s; the bounded tail
+    # is ~one window (~24s -> ~0.5s). Give headroom for a possible in-flight window.
+    assert dt < 1.1, f"final took {dt*1000:.0f}ms — tail was not bounded"
+    assert text.strip()
+
+
+def test_chunked_final_much_faster_than_whole_buffer(monkeypatch):
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "")
+    monkeypatch.setenv("DHWANI_SPECULATE", "0")
+    monkeypatch.setattr(D, "_transcribe", marked_fake())
+    audio = marked(90)
+
+    monkeypatch.setenv("DHWANI_CHUNK_S", "0")     # whole-buffer baseline
+    D.draft_reset()
+    feed_partials(audio)
+    t0 = time.monotonic(); D.draft(audio, True); whole = time.monotonic() - t0
+
+    monkeypatch.setenv("DHWANI_CHUNK_S", "24")    # chunked
+    D.draft_reset()
+    feed_partials(audio)
+    drain_committers(audio)
+    t0 = time.monotonic(); D.draft(audio, True); chunked = time.monotonic() - t0
+
+    assert chunked < whole * 0.6, f"chunked {chunked*1000:.0f}ms vs whole {whole*1000:.0f}ms"
+
+
+def test_chunked_final_keeps_the_whole_transcript(chunk_engine):
+    audio = marked(90)
+    feed_partials(audio)
+    drain_committers(audio)
+    text, _ = D.draft(audio, True)
+    toks = set(text.split())
+    assert "s1" in toks and "s90" in toks, "final dropped the start or the end of the clip"
+    assert len({t for t in toks if t.startswith("s")}) >= 72, "final lost too many seconds"
+
+
+def test_short_clip_is_not_chunked(chunk_engine):
+    audio = marked(5)               # well under one 24s window
+    feed_partials(audio)
+    drain_committers(audio)
+    with D._state_lock:
+        assert D._fc_bytes == 0, "a short clip should never close a window"
+    text, _ = D.draft(audio, True)
+    assert "s1" in text and "s5" in text
+
+
+def test_chunk_disabled_env_never_commits(monkeypatch):
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "")
+    monkeypatch.setenv("DHWANI_CHUNK_S", "0")
+    monkeypatch.setattr(D, "_transcribe", marked_fake())
+    D.draft_reset()
+    audio = marked(90)
+    feed_partials(audio)
+    drain_committers(audio)
+    with D._state_lock:
+        assert D._fc_bytes == 0, "chunking should be off with DHWANI_CHUNK_S=0"
+
+
+def test_language_pinned_from_first_window(monkeypatch):
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "")
+    monkeypatch.setenv("DHWANI_SPECULATE", "0")
+    monkeypatch.setattr(D, "_transcribe", marked_fake(raw_lang="hi"))
+    D.draft_reset()
+    audio = marked(60)
+    feed_partials(audio)
+    drain_committers(audio)
+    with D._state_lock:
+        assert D._fc_lang == "hi", "language was not pinned from the first closed window"
+
+
+def test_speculation_and_chunking_together_stay_instant(monkeypatch):
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "")
+    monkeypatch.delenv("DHWANI_SPECULATE", raising=False)   # speculation ON
+    monkeypatch.setattr(D, "_transcribe", marked_fake())
+    D.draft_reset()
+    audio = marked(60) + silence(1.0)
+    feed_partials(audio)
+    drain_committers(audio)
+    # partials keep arriving through the trailing silence; those ticks (now that
+    # the committer is idle) are what arm the speculative tail decode.
+    for _ in range(6):
+        D.draft(audio, False)
+        if wait_for_speculation(0.1):
+            break
+    assert wait_for_speculation(4.0), "speculation never armed on a long clip"
+    t0 = time.monotonic()
+    text, _ = D.draft(audio, True)
+    dt = time.monotonic() - t0
+    assert dt < 0.3, f"final took {dt*1000:.0f}ms despite a ready speculation"
+    assert "s60" in text

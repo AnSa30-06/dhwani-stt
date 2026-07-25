@@ -45,6 +45,10 @@ Environment:
     DHWANI_MIX_BACKEND   transformers | native (default: transformers when the
                          model id contains "/")
     DHWANI_SPECULATE     0 to disable speculative finalization (default: ON)
+    DHWANI_CHUNK_S       seconds; on clips longer than this the final is built
+                         from committed windows so the end-of-clip decode only
+                         processes the last window, not the whole buffer
+                         (default: 24; 0 restores the pure whole-buffer final)
     DHWANI_DEVICE        cpu | cuda | auto (ctranslate2 only)
     DHWANI_ORTHOGRAPHY   0 to disable the corpus adapter   (default: ON — the
                          must_have terms are Latin substrings, so Devanagari
@@ -68,6 +72,8 @@ PROMPT_CHARS = 160
 SPEC_SILENCE_S = 0.5     # trailing silence that arms a speculative final decode
 SPEC_MIN_AUDIO_S = 1.0   # never speculate on less audio than this
 FRAME_S = 0.02           # harness frame size; silence detection works per frame
+
+CHUNK_SETTLE_S = 1.0     # audio that must arrive past a window before it closes
 
 _INDIC = {"hi", "mr", "ne", "sa", "ur", "bh", "mai"}
 _PUNCT = re.compile(r"[^\w]", re.UNICODE)
@@ -94,6 +100,15 @@ _spec_thread: threading.Thread | None = None
 _spec_started = 0        # len(audio) when the in-flight speculation began
 _spec_text: str | None = None
 _spec_covered = 0        # len(audio) a COMPLETED speculation decoded
+
+# committed-window final state (see the "chunked final" section). On long clips
+# closed windows are decoded during the clip and their text locked here, so the
+# end-of-clip decode only has to handle the last, bounded window.
+_fc_thread: threading.Thread | None = None
+_fc_busy = False
+_fc_text = ""            # locked transcript of all closed windows
+_fc_bytes = 0            # audio fully accounted for by _fc_text
+_fc_lang: str | None = None   # language pinned once, on the first closed window
 
 try:
     from solution.orthography import map_words
@@ -122,6 +137,7 @@ def _log_error(context: str, exc: BaseException) -> None:
 def draft_reset() -> None:
     global _committed, _committed_bytes, _tail, _prev_words, _lang, _finalizing
     global _clip_gen, _spec_thread, _spec_started, _spec_text, _spec_covered
+    global _fc_thread, _fc_busy, _fc_text, _fc_bytes, _fc_lang
     with _state_lock:
         _committed = ""
         _committed_bytes = 0
@@ -129,11 +145,16 @@ def draft_reset() -> None:
         _prev_words = []
         _lang = None
         _finalizing = False
-        _clip_gen += 1       # orphans any speculation thread still running
+        _clip_gen += 1       # orphans any speculation/committer thread still running
         _spec_thread = None
         _spec_started = 0
         _spec_text = None
         _spec_covered = 0
+        _fc_thread = None
+        _fc_busy = False
+        _fc_text = ""
+        _fc_bytes = 0
+        _fc_lang = None
 
 
 def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
@@ -144,9 +165,17 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
                 _finalizing = True
             return _finalize(audio_buffer)
 
-        # A speculative final decode owns the accelerator while it runs; pausing
-        # the (unscored) partial worker keeps them from contending for it.
-        if not _busy and not _spec_alive() and \
+        # On long clips, close and lock finished windows in the background so the
+        # end-of-clip decode only faces the last window (see "chunked final").
+        try:
+            _maybe_commit_window(audio_buffer)
+        except Exception as exc:
+            _log_error("window committer (final falls back to a whole-buffer decode)", exc)
+
+        # The LocalAgreement partial worker drives the live preview and is
+        # unscored. It yields to the committer and the speculator so the scored
+        # final decode never contends with it for the single accelerator.
+        if not _busy and not _spec_alive() and not _fc_busy and \
                 len(audio_buffer) - _committed_bytes >= int(MIN_DECODE_S * BYTES_PER_SEC):
             _busy = True
             try:
@@ -187,32 +216,84 @@ def _finalize(audio: bytes) -> tuple[str, int]:
     return (text, len(text))
 
 
-def _final_decode(audio: bytes) -> str:
-    """Decode the WHOLE buffer fresh, ignoring the streaming partials.
+def _chunk_s() -> float:
+    try:
+        return float(os.environ.get("DHWANI_CHUNK_S", "24") or 0)
+    except ValueError:
+        return 24.0
 
-    Why not reuse the committed prefix + tail, which would be faster? Because on
-    the Mac that path hallucinated: a Hindi clip came back as Malay
-    ("Terima kasih...") and another as a repetition loop, while the exact same
-    audio decoded whole (batch) gave correct Hindi. Whisper is trained on 30s
-    context; short rolling windows of Hindi give it too little to anchor on, so
-    it invents text, and the bad partials then poison the final through the
-    committed prefix and the language pinned on 3s of audio. Re-decoding the
-    whole buffer with an empty prompt and fresh language detection reproduces the
-    reliable batch result. Only the final is scored, so this costs nothing but a
-    little latency, which the mlx backend has to spare.
+
+def _join_final(prefix: str, tail: str) -> str:
+    prefix, tail = (prefix or "").strip(), (tail or "").strip()
+    if not prefix:
+        return tail
+    if not tail:
+        return prefix
+    return f"{prefix} {tail}"
+
+
+def _final_decode(audio: bytes, prompt: str = "") -> str:
+    """Produce the scored final transcript for `audio`.
+
+    Short clip (or DHWANI_CHUNK_S=0): decode the WHOLE buffer fresh. We do NOT
+    reuse the LocalAgreement partials, because on the Mac that path hallucinated
+    — a Hindi clip came back as Malay ("Terima kasih...") and another as a
+    repetition loop, while the same audio decoded whole gave correct Hindi.
+    Whisper is trained on 30s context; the 1-3s rolling windows the partials use
+    give it too little to anchor on. A whole-buffer decode with fresh language
+    detection reproduces the reliable batch result.
+
+    Long clip: the committer has already locked the finished windows into
+    `_fc_text` (each decoded as a large ~CHUNK_S window with full context, NOT
+    the tiny windows that caused the hallucination above). Here we only decode
+    the remaining tail and join. That bounds the end-of-clip decode to one
+    window no matter how long the clip is — which is the whole point.
+    """
+    with _state_lock:
+        fc_text, fc_bytes, fc_lang = _fc_text, _fc_bytes, _fc_lang
+    if fc_bytes and fc_bytes < len(audio):
+        seg = audio[fc_bytes:]
+        seg_text, _ = _decode_final_segment(seg, pinned_lang=fc_lang,
+                                             prompt=fc_text[-PROMPT_CHARS:])
+        text = _join_final(fc_text, seg_text)
+        if not text.strip():   # the tail decode produced nothing — keep the prefix
+            text = fc_text.strip()
+        return _normalize_numbers(_deloop(text))
+
+    seg_text, _ = _decode_final_segment(audio, pinned_lang=None, prompt=prompt)
+    if not seg_text.strip():  # last resort: whatever the partials managed to commit
+        with _state_lock:
+            seg_text = _deloop((_committed + _tail).strip())
+    return _normalize_numbers(seg_text)
+
+
+def _decode_final_segment(audio: bytes, pinned_lang: str | None,
+                          prompt: str = "") -> tuple[str, str | None]:
+    """Decode one segment with the full final-quality recipe and return
+    (deloop'd text, detected language). `pinned_lang` skips auto-detection when
+    the clip's language was already decided on an earlier window; the mix-model
+    routing below still runs for Indic segments.
     """
     forced = os.environ.get("DHWANI_LANG")
+    if forced:
+        # A user override is respected verbatim: single decode, no second-guess.
+        try:
+            words, _ = _transcribe(audio, forced, prompt=prompt, final=True)
+            return _deloop(_text_from(words, forced)), forced
+        except Exception as exc:
+            _log_error(f"finalize/forced-decode (lang={forced!r})", exc)
+            return "", forced
+
+    lang0 = pinned_lang  # None -> let whisper auto-detect on this segment
     text, raw = "", None
 
-    # One pass: let whisper auto-detect the language on the full buffer (reliable,
-    # unlike the 3s window) and transcribe in the same call. If this raises (bad
-    # repo id, a network hiccup, an mlx_whisper API mismatch), log it and fall
-    # through to the Hindi retry below rather than silently returning blank —
-    # a raised exception here used to be indistinguishable from "the model
-    # legitimately produced nothing."
+    # One pass: auto-detect (or use the pinned language) and transcribe. If this
+    # raises (bad repo id, network hiccup, mlx API mismatch), log and fall
+    # through to the Hindi retry rather than silently returning blank — a raised
+    # exception here used to be indistinguishable from "produced nothing".
     try:
-        words, raw = _transcribe(audio, forced, prompt="", final=True)
-        lang = forced or ("hi" if raw in _INDIC else raw)
+        words, raw = _transcribe(audio, lang0, prompt=prompt, final=True)
+        lang = pinned_lang or ("hi" if raw in _INDIC else raw)
         text = _deloop(_text_from(words, lang))
     except Exception as exc:
         _log_error(f"finalize/primary-decode (model={_model_name(True)!r})", exc)
@@ -227,12 +308,14 @@ def _final_decode(audio: bytes) -> str:
     # turbo's ~0.85 on the Mac) but 5.6/70 on pure-Devanagari FLEURS-Hindi —
     # romanized output only survives where romanized gold_alternatives exist,
     # and pure-Hindi rows in the local manifests don't carry them.
+    detected = pinned_lang or ("hi" if raw in _INDIC else raw)
+    is_indic = (pinned_lang in _INDIC) if pinned_lang else (raw in _INDIC)
     mix = _mix_model()
     bad = (
         not text
-        or (raw in _INDIC and raw != "hi")
+        or (is_indic and detected != "hi")
         or _looks_bad(text)
-        or (raw not in ("en", "hi") and raw is not None)
+        or (raw not in ("en", "hi") and raw is not None and pinned_lang is None)
     )
     # Gate: "indic" (default) escalates every Hindi-detected clip — measured
     # safe because zero-stt ties the default model on pure Hindi. "codeswitch"
@@ -241,15 +324,15 @@ def _final_decode(audio: bytes) -> str:
     # codeswitch signal is weak: whisper often writes Hinglish clips entirely
     # in Devanagari, so true code-switch clips can look Latin-free here.
     gate = os.environ.get("DHWANI_MIX_GATE", "indic")
-    want_mix = (mix is not None and raw in _INDIC
+    want_mix = (mix is not None and is_indic
                 and (bad or gate != "codeswitch" or _has_latin(text)))
-    if not forced and (bad or want_mix):
+    if bad or want_mix:
         try:
             if want_mix and _mix_backend() == "transformers":
                 words_hi, _ = _transcribe_mix_transformers(audio)
             else:
                 kw = {"model": mix} if (want_mix and mix) else {}
-                words_hi, _ = _transcribe(audio, "hi", prompt="", final=True, **kw)
+                words_hi, _ = _transcribe(audio, "hi", prompt=prompt, final=True, **kw)
             candidate = _deloop(_text_from(words_hi, "hi"))
             # Mix models can verbalize digits ("334" -> "3.3 0.4", measured on
             # Apex): if the healthy primary heard a multi-digit number the
@@ -261,13 +344,12 @@ def _final_decode(audio: bytes) -> str:
                 text = _pick_better(text, candidate)
             else:
                 text = candidate
+            if is_indic:
+                detected = "hi"
         except Exception as exc:
             _log_error(f"finalize/hindi-retry (model={(mix or _model_name(True))!r})", exc)
 
-    if not text.strip():  # last resort: whatever the partials managed to commit
-        with _state_lock:
-            text = _deloop((_committed + _tail).strip())
-    return _normalize_numbers(text)
+    return text, detected
 
 
 def _text_from(words, lang) -> str:
@@ -301,8 +383,8 @@ def _decode_and_commit(audio: bytes, final: bool) -> None:
         return
     if not window:
         return
-    if _finalizing and not final:
-        return  # don't contend for the model lock while the final is decoding
+    if (_finalizing or _fc_busy) and not final:
+        return  # yield: the scored final / committer owns the accelerator
 
     # Decide the language once, on enough audio, and never commit before then.
     # Whisper called on 0.8s of Hinglish reports "en" and then *translates* the
@@ -905,7 +987,7 @@ def _maybe_speculate(audio: bytes) -> None:
     """Called on every partial tick. Arms one speculative decode per stretch of
     trailing silence that contains speech the last speculation didn't cover."""
     global _spec_thread, _spec_started
-    if not _speculation_enabled() or _finalizing or _spec_alive():
+    if not _speculation_enabled() or _finalizing or _spec_alive() or _fc_busy:
         return
     if len(audio) < int(SPEC_MIN_AUDIO_S * BYTES_PER_SEC):
         return
@@ -970,6 +1052,84 @@ def _spec_take(audio: bytes) -> str | None:
     if _speech_after(rms, thr, covered):
         return None  # speech landed after the speculation began
     return text
+
+
+# --- chunked final --------------------------------------------------------
+#
+# A whole-buffer final decode costs O(clip length): fine for a 10s dictation,
+# but on a 60s clip it blows past the ~2s latency target no matter when it
+# starts (speculation only buys back the trailing silence, a fraction of a long
+# clip). So on clips longer than DHWANI_CHUNK_S we close finished windows during
+# the clip and lock their text; the end-of-clip decode then only faces the last,
+# bounded window. Each window is large (~CHUNK_S, near whisper's 30s context),
+# so it decodes as reliably as a batch pass — unlike the 1-3s LocalAgreement
+# windows whose thin context caused the hallucination the whole-buffer final was
+# built to avoid. Windows close at the quietest frame near the boundary so a
+# word is rarely split, and each carries the previous window's tail as a prompt.
+
+def _snap_end(audio: bytes, ideal_end: int, search_s: float = 1.5) -> int:
+    """Move a window boundary to the quietest frame within +/- search_s of the
+    ideal end, so windows split on pauses rather than through words."""
+    rms = _frame_rms(audio)
+    fb = int(FRAME_S * SR) * 2   # bytes per 20ms frame
+    if rms is None or fb == 0:
+        return _even(ideal_end)
+    ideal_f = ideal_end // fb
+    span = int(search_s / FRAME_S)
+    lo, hi = max(0, ideal_f - span), min(len(rms), ideal_f + span)
+    if lo >= hi:
+        return _even(ideal_end)
+    import numpy as np
+    best = lo + int(np.argmin(rms[lo:hi]))
+    return _even(best * fb)
+
+
+def _maybe_commit_window(audio: bytes) -> None:
+    """Close and lock the next finished window in the background, if one has
+    fully arrived (a whole window plus CHUNK_SETTLE_S of audio past it)."""
+    global _fc_thread, _fc_busy
+    chunk = _chunk_s()
+    if chunk <= 0 or _fc_busy or _spec_alive() or _finalizing:
+        return
+    window_bytes = _even(int(chunk * BYTES_PER_SEC))
+    settle = int(CHUNK_SETTLE_S * BYTES_PER_SEC)
+    with _state_lock:
+        start = _fc_bytes
+    if len(audio) - start < window_bytes + settle:
+        return
+
+    _fc_busy = True
+    gen = _clip_gen
+
+    def _run(buf: bytes = audio, s: int = start, g: int = gen) -> None:
+        global _fc_busy, _fc_text, _fc_bytes, _fc_lang
+        try:
+            with _state_lock:
+                lang, prompt = _fc_lang, _fc_text[-PROMPT_CHARS:]
+            end = _snap_end(buf, s + window_bytes)
+            if end <= s + int(0.5 * BYTES_PER_SEC):
+                end = _even(s + window_bytes)   # snap found nothing usable
+            seg_text, detected = _decode_final_segment(
+                buf[s:end], pinned_lang=lang, prompt=prompt)
+            with _state_lock:
+                if g == _clip_gen and _fc_bytes == s:
+                    _fc_text = _join_final(_fc_text, seg_text)
+                    _fc_bytes = end
+                    if _fc_lang is None:
+                        _fc_lang = detected
+        except Exception as exc:
+            _log_error("window committer decode", exc)
+        finally:
+            _fc_busy = False
+
+    t = threading.Thread(target=_run, daemon=True)
+    _fc_thread = t
+    t.start()
+
+
+def _fc_alive() -> bool:
+    t = _fc_thread
+    return t is not None and t.is_alive()
 
 
 # --- helpers --------------------------------------------------------------
