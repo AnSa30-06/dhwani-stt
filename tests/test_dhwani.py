@@ -32,10 +32,10 @@ def silence(seconds: float) -> bytes:
 
 
 def make_fake(record: list | None = None, raw_lang: str = "hi"):
-    def fake(window, lang, prompt, final=False, model=None):
+    def fake(window, lang, prompt, final=False, model=None, fast=False):
         if record is not None:
-            record.append({"nbytes": len(window), "lang": lang,
-                           "final": final, "model": model})
+            record.append({"nbytes": len(window), "lang": lang, "final": final,
+                           "model": model, "fast": fast})
         if final:
             time.sleep(DECODE_COST_S)
         secs = max(1, round(len(window) / BPS))
@@ -200,9 +200,9 @@ def test_router_leaves_english_on_default_model(monkeypatch):
 
 def make_fake_devanagari(record=None):
     """Fake whose transcript is pure Devanagari — no code-switch signal."""
-    def fake(window, lang, prompt, final=False, model=None):
+    def fake(window, lang, prompt, final=False, model=None, fast=False):
         if record is not None:
-            record.append({"model": model, "final": final})
+            record.append({"model": model, "final": final, "fast": fast})
         secs = max(1, round(len(window) / BPS))
         return [(f" शब्द{i}", float(i), float(i) + 0.5) for i in range(secs)], "hi"
     return fake
@@ -254,7 +254,7 @@ def test_mix_candidate_rejected_when_it_drops_a_number(monkeypatch):
     monkeypatch.delenv("DHWANI_LANG", raising=False)
     monkeypatch.setenv("DHWANI_MIX_MODEL", "someone/mix-model")
 
-    def primary(window, lang, prompt, final=False, model=None):
+    def primary(window, lang, prompt, final=False, model=None, fast=False):
         return ([(" version", 0.0, 0.5), (" 334", 0.5, 1.0), (" use", 1.0, 1.5),
                  (" करो", 1.5, 2.0)], "hi")
     monkeypatch.setattr(D, "_transcribe", primary)
@@ -293,7 +293,7 @@ def marked(seconds: int) -> bytes:
 
 def marked_fake(record: list | None = None, cost_per_s: float = 0.02,
                 raw_lang: str = "en"):
-    def fake(window, lang, prompt, final=False, model=None):
+    def fake(window, lang, prompt, final=False, model=None, fast=False):
         pcm = np.frombuffer(window, dtype=np.int16)
         if final and cost_per_s:
             time.sleep(len(window) / BPS * cost_per_s)   # decode cost ~ length
@@ -424,6 +424,189 @@ def test_language_pinned_from_first_window(monkeypatch):
     drain_committers(audio)
     with D._state_lock:
         assert D._fc_lang == "hi", "language was not pinned from the first closed window"
+
+
+def slow_fake(seconds: float, raw_lang: str = "en"):
+    """A decoder far slower than any budget — stands in for the M1 running the
+    temperature ladder or the transformers mix model on an awkward clip."""
+    def fake(window, lang, prompt, final=False, model=None, fast=False):
+        time.sleep(seconds)
+        return [(" slow", 0.0, 1.0)], raw_lang
+    return fake
+
+
+def prime_partials(audio: bytes, timeout_s: float = 3.0) -> str:
+    """Run the fast partial path until it has produced text to fall back on."""
+    feed_partials(audio)
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        with D._state_lock:
+            got = (D._committed + D._tail).strip()
+        if got:
+            return got
+        D.draft(audio, False)
+        time.sleep(0.05)
+    return ""
+
+
+def test_final_never_exceeds_budget_when_text_is_in_hand(monkeypatch):
+    """THE guarantee: with a usable transcript already in hand, the final must
+    return within budget no matter how slow the model is — a late final scores
+    zero on latency and caps the clip."""
+    monkeypatch.setenv("DHWANI_LANG", "hi")
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "")
+    monkeypatch.setenv("DHWANI_SPECULATE", "0")
+    monkeypatch.setenv("DHWANI_CHUNK_S", "0")
+    monkeypatch.setattr(D, "_transcribe", make_fake())
+    D.draft_reset()
+    audio = speech(6.0)
+    assert prime_partials(audio), "partials produced nothing; test cannot run"
+
+    monkeypatch.setenv("DHWANI_FINAL_BUDGET_S", "0.5")
+    monkeypatch.setattr(D, "_transcribe", slow_fake(10.0))
+    t0 = time.monotonic()
+    text, stable = D.draft(audio, True)
+    dt = time.monotonic() - t0
+
+    assert dt < 2.0, f"final blocked {dt:.1f}s on a 10s decoder — budget not enforced"
+    assert text.strip() and stable == len(text)
+
+
+def test_waits_past_budget_rather_than_return_a_blank_final(monkeypatch):
+    """A blank final scores 0 for the clip; a late one still scores its quality
+    (capped). So with nothing in hand, the budget must be overridden."""
+    monkeypatch.setenv("DHWANI_LANG", "hi")
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "")
+    monkeypatch.setenv("DHWANI_SPECULATE", "0")
+    monkeypatch.setenv("DHWANI_CHUNK_S", "0")
+    monkeypatch.setenv("DHWANI_FINAL_BUDGET_S", "0.2")
+    monkeypatch.setattr(D, "_transcribe", slow_fake(1.0))   # slower than budget
+    D.draft_reset()
+
+    t0 = time.monotonic()
+    text, _ = D.draft(speech(3.0), True)     # no partials primed: nothing in hand
+    dt = time.monotonic() - t0
+
+    assert text.strip(), "returned a blank final instead of waiting"
+    assert dt > 0.2, "did not actually wait past the budget"
+
+
+def test_budget_overrun_still_returns_text_not_blank(monkeypatch):
+    """When the budget is missed we fall back to text already in hand. A blank
+    final scores 0, so the fallback must carry whatever the partials produced."""
+    monkeypatch.setenv("DHWANI_LANG", "hi")
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "")
+    monkeypatch.setenv("DHWANI_SPECULATE", "0")
+    monkeypatch.setenv("DHWANI_CHUNK_S", "0")
+    monkeypatch.setattr(D, "_transcribe", make_fake())   # fast partials
+    D.draft_reset()
+
+    audio = speech(4.0)
+    feed_partials(audio)                     # partial worker commits real text
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        with D._state_lock:
+            if (D._committed + D._tail).strip():
+                break
+        D.draft(audio, False)
+        time.sleep(0.05)
+
+    monkeypatch.setenv("DHWANI_FINAL_BUDGET_S", "0.2")
+    monkeypatch.setattr(D, "_transcribe", slow_fake(10.0))
+    text, _ = D.draft(audio, True)
+    assert text.strip(), "budget overrun produced a blank final"
+
+
+def test_draft_reset_clears_the_busy_latch(monkeypatch):
+    """Regression: a partial worker still in flight when a clip ended used to
+    leave _busy latched, silencing partials on every later clip — and those
+    partials are the fallback the final returns when a decode overruns."""
+    monkeypatch.setenv("DHWANI_LANG", "hi")
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "")
+    monkeypatch.setenv("DHWANI_SPECULATE", "0")
+    monkeypatch.setattr(D, "_transcribe", slow_fake(5.0))
+    D.draft_reset()
+    D.draft(speech(3.0), False)                 # spawns a worker that will hang
+    time.sleep(0.1)
+    assert D._busy, "no worker started, test cannot prove the latch"
+
+    D.draft_reset()                              # next clip begins
+    assert not D._busy, "_busy stayed latched across draft_reset()"
+
+    monkeypatch.setattr(D, "_transcribe", make_fake())
+    audio = speech(3.0)
+    feed_partials(audio)
+    deadline = time.monotonic() + 3
+    got = ""
+    while time.monotonic() < deadline:
+        with D._state_lock:
+            got = (D._committed + D._tail).strip()
+        if got:
+            break
+        D.draft(audio, False)
+        time.sleep(0.05)
+    assert got, "partials never ran on the clip after a hung worker"
+
+
+def test_tail_decode_uses_the_fast_path(monkeypatch):
+    """The end-of-clip decode must ask for fast=True (no temperature ladder),
+    while a speculative/committed decode asks for full quality."""
+    record: list = []
+    monkeypatch.setenv("DHWANI_LANG", "hi")
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "")
+    monkeypatch.setenv("DHWANI_SPECULATE", "0")
+    monkeypatch.setattr(D, "_transcribe", make_fake(record))
+    D.draft_reset()
+
+    D.draft(speech(3.0), True)
+    finals = [r for r in record if r["final"]]
+    assert finals and all(r["fast"] for r in finals), (
+        f"final decode did not use the fast path: {finals}")
+
+    record.clear()
+    D.draft_reset()
+    D._final_decode(speech(3.0), fast=False)     # what speculation/commits run
+    assert any(not r["fast"] for r in record), "quality path lost its ladder"
+
+
+def test_fast_path_skips_the_mix_model(monkeypatch):
+    """The mix model is a second decode on our slowest backend; it must never
+    run on the critical path."""
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "someone/mix-model")
+    monkeypatch.setattr(D, "_transcribe", make_fake_devanagari())
+    called: list = []
+    monkeypatch.setattr(D, "_transcribe_mix_transformers",
+                        lambda window: (called.append(1) or [(" mix", 0.0, 1.0)], "hi"))
+    D.draft_reset()
+
+    D._final_decode(speech(3.0), fast=True)
+    assert not called, "fast path invoked the mix model"
+
+    D.draft_reset()
+    D._final_decode(speech(3.0), fast=False)
+    assert called, "quality path lost the mix model"
+
+
+def test_commits_at_a_pause_keep_the_tail_short(monkeypatch):
+    """With a pause after COMMIT_MIN_S, a window should close there rather than
+    waiting for the full CHUNK_S — that is what shrinks the end-of-clip tail."""
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "")
+    monkeypatch.setenv("DHWANI_SPECULATE", "0")
+    monkeypatch.setenv("DHWANI_CHUNK_S", "24")     # far longer than the clip
+    monkeypatch.setattr(D, "_transcribe", marked_fake())
+    D.draft_reset()
+
+    # speech, a clear pause, then more speech — the pause is the boundary
+    audio = marked(6) + silence(0.8) + marked(6) + silence(1.2)
+    feed_partials(audio)
+    drain_committers(audio)
+
+    with D._state_lock:
+        fc_bytes = D._fc_bytes
+    assert fc_bytes > 0, "no window closed at the pause (tail stays long)"
+    assert fc_bytes < len(audio), "committer consumed the whole clip"
 
 
 def test_speculation_and_chunking_together_stay_instant(monkeypatch):

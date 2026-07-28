@@ -45,10 +45,13 @@ Environment:
     DHWANI_MIX_BACKEND   transformers | native (default: transformers when the
                          model id contains "/")
     DHWANI_SPECULATE     0 to disable speculative finalization (default: ON)
-    DHWANI_CHUNK_S       seconds; on clips LONGER than this the final is built
-                         from committed windows so the end-of-clip decode only
-                         processes the last window, not the whole buffer
-                         (default: 24; 0 restores the pure whole-buffer final)
+    DHWANI_CHUNK_S       seconds; windows are committed during the clip (at
+                         phrase boundaries, or at this hard bound if the speaker
+                         never pauses) so the end-of-clip decode only processes
+                         the uncommitted tail, not the whole buffer
+                         (default: 12; 0 restores the pure whole-buffer final)
+    DHWANI_FINAL_BUDGET_S  wall-clock the final call may spend before returning
+                         the best text already in hand (default: 1.8)
     DHWANI_DEVICE        cpu | cuda | auto (ctranslate2 only)
     DHWANI_ORTHOGRAPHY   0 to disable the corpus adapter   (default: ON — the
                          must_have terms are Latin substrings, so Devanagari
@@ -69,11 +72,15 @@ COMMIT_LAG_S = 0.3       # never commit a word that touches the live edge
 FORCE_COMMIT_S = 6.0     # if agreement stalls, commit anyway so the tail stays short
 PROMPT_CHARS = 160
 
-SPEC_SILENCE_S = 0.5     # trailing silence that arms a speculative final decode
+SPEC_SILENCE_S = 0.3     # trailing silence that arms a speculative final decode
 SPEC_MIN_AUDIO_S = 1.0   # never speculate on less audio than this
 FRAME_S = 0.02           # harness frame size; silence detection works per frame
 
 CHUNK_SETTLE_S = 1.0     # audio that must arrive past a window before it closes
+COMMIT_MIN_S = 4.0       # smallest window worth closing at a pause
+PAUSE_S = 0.35           # silence this long is a phrase boundary we can cut on
+HARD_WAIT_S = 20.0       # only ever waited when the alternative is a blank final
+                         # (blank scores 0; late still scores quality, capped)
 
 _INDIC = {"hi", "mr", "ne", "sa", "ur", "bh", "mai"}
 _PUNCT = re.compile(r"[^\w]", re.UNICODE)
@@ -137,8 +144,14 @@ def _log_error(context: str, exc: BaseException) -> None:
 def draft_reset() -> None:
     global _committed, _committed_bytes, _tail, _prev_words, _lang, _finalizing
     global _clip_gen, _spec_thread, _spec_started, _spec_text, _spec_covered
-    global _fc_thread, _fc_busy, _fc_text, _fc_bytes, _fc_lang
+    global _fc_thread, _fc_busy, _fc_text, _fc_bytes, _fc_lang, _busy
     with _state_lock:
+        # _busy MUST be cleared here. A partial worker still in flight when the
+        # clip ends would otherwise latch it into the next clip and silence
+        # every partial — and those partials are the fallback text the final
+        # returns when a decode overruns its budget. The bumped _clip_gen below
+        # stops that stale worker writing into the new clip's state.
+        _busy = False
         _committed = ""
         _committed_bytes = 0
         _tail = ""
@@ -175,11 +188,15 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
         # The LocalAgreement partial worker drives the live preview and is
         # unscored. It yields to the committer and the speculator so the scored
         # final decode never contends with it for the single accelerator.
+        # (Letting it run alongside them was tried and measured worse: two
+        # concurrent decodes on one accelerator slow both, and the partial is
+        # the one that doesn't earn points.)
         if not _busy and not _spec_alive() and not _fc_busy and \
                 len(audio_buffer) - _committed_bytes >= int(MIN_DECODE_S * BYTES_PER_SEC):
             _busy = True
             try:
-                threading.Thread(target=_worker, args=(audio_buffer,), daemon=True).start()
+                threading.Thread(target=_worker, args=(audio_buffer, _clip_gen),
+                                 daemon=True).start()
             except Exception:
                 _busy = False   # a latched _busy would silence every later partial
 
@@ -198,29 +215,102 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
 
 # --- decoding -------------------------------------------------------------
 
-def _worker(audio: bytes) -> None:
+def _worker(audio: bytes, gen: int | None = None) -> None:
     global _busy
     try:
-        _decode_and_commit(audio, final=False)
+        _decode_and_commit(audio, final=False, gen=gen)
     except Exception as exc:
         _log_error("streaming worker (unscored, but logged for visibility)", exc)
     finally:
-        _busy = False
+        if gen is None or gen == _clip_gen:
+            _busy = False   # a newer clip already cleared it; don't stomp
 
 
 def _finalize(audio: bytes) -> tuple[str, int]:
-    """Return the speculative final if it is still valid, else decode fresh."""
-    text = _spec_take(audio)
-    if text is None:
-        text = _final_decode(audio)
+    """Produce the scored final under a hard time budget.
+
+    Latency is 30 of the 100 points and a late final scores zero on that axis
+    (and caps the clip), so the one thing this must never do is block for an
+    unbounded decode. Order of preference, each strictly cheaper than the last:
+
+      1. a completed speculative decode (full quality, already paid for during
+         the speaker's trailing silence) — free;
+      2. a FAST decode of just the uncommitted tail (greedy, no temperature
+         ladder, no mix model) under whatever budget remains;
+      3. whatever text we already hold (committed windows + the live partial),
+         returned immediately.
+
+    Quality is only sacrificed in (3), and only on clips where a decode could
+    not finish in time — where the alternative was a late final worth nothing.
+    """
+    import time as _time
+    deadline = _time.monotonic() + _final_budget_s()
+
+    text = _spec_take(audio, deadline)
+    if text is not None and text.strip():
+        return (text, len(text))
+
+    worker, box = _start_final_decode(audio)
+    worker.join(timeout=max(0.0, deadline - _time.monotonic()))
+    text = box.get("text", "")
+    if text.strip():
+        return (text, len(text))
+
+    fallback = _best_effort_text()
+    if fallback.strip():
+        return (fallback, len(fallback))
+
+    # Nothing in hand at all. Returning now would be a BLANK final, which the
+    # scorecard scores 0 for the clip — strictly worse than a late one, which
+    # still scores its quality (capped 70 past 4s, 50 past 6s). So keep waiting.
+    worker.join(timeout=HARD_WAIT_S)
+    text = box.get("text", "") or _best_effort_text()
     return (text, len(text))
+
+
+def _final_budget_s() -> float:
+    """Wall-clock the final call may spend. The published curve pays full marks
+    at <=1000ms and nothing past 5000ms, so this sits low enough to stay inside
+    the band even when a decode runs long on an unfamiliar machine."""
+    try:
+        return max(0.2, float(os.environ.get("DHWANI_FINAL_BUDGET_S", "1.8")))
+    except ValueError:
+        return 1.8
+
+
+def _start_final_decode(audio: bytes) -> tuple[threading.Thread, dict]:
+    """Start the fast final decode in a worker so the caller can wait on it
+    under a deadline. The worker is never killed, only abandoned — if the
+    caller gives up, the result simply lands in `box` unread."""
+    box: dict[str, str] = {}
+
+    def _run() -> None:
+        try:
+            box["text"] = _final_decode(audio, fast=True)
+        except Exception as exc:
+            _log_error("final tail decode (falling back to best-effort text)", exc)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t, box
+
+
+def _best_effort_text() -> str:
+    """The best transcript already in hand, no decoding. Never blank if any
+    decode has produced anything for this clip."""
+    with _state_lock:
+        committed_windows = _fc_text.strip()
+        live = (_committed + _tail).strip()
+    if committed_windows and live:
+        return _normalize_numbers(_deloop(_pick_better(committed_windows, live)))
+    return _normalize_numbers(_deloop(committed_windows or live))
 
 
 def _chunk_s() -> float:
     try:
-        return float(os.environ.get("DHWANI_CHUNK_S", "24") or 0)
+        return float(os.environ.get("DHWANI_CHUNK_S", "12") or 0)
     except ValueError:
-        return 24.0
+        return 12.0
 
 
 def _join_final(prefix: str, tail: str) -> str:
@@ -232,7 +322,7 @@ def _join_final(prefix: str, tail: str) -> str:
     return f"{prefix} {tail}"
 
 
-def _final_decode(audio: bytes, prompt: str = "") -> str:
+def _final_decode(audio: bytes, prompt: str = "", fast: bool = False) -> str:
     """Produce the scored final transcript for `audio`.
 
     Short clip (or DHWANI_CHUNK_S=0): decode the WHOLE buffer fresh. We do NOT
@@ -254,13 +344,13 @@ def _final_decode(audio: bytes, prompt: str = "") -> str:
     if fc_bytes and fc_bytes < len(audio):
         seg = audio[fc_bytes:]
         seg_text, _ = _decode_final_segment(seg, pinned_lang=fc_lang,
-                                             prompt=fc_text[-PROMPT_CHARS:])
+                                             prompt=fc_text[-PROMPT_CHARS:], fast=fast)
         text = _join_final(fc_text, seg_text)
         if not text.strip():   # the tail decode produced nothing — keep the prefix
             text = fc_text.strip()
         return _normalize_numbers(_deloop(text))
 
-    seg_text, _ = _decode_final_segment(audio, pinned_lang=None, prompt=prompt)
+    seg_text, _ = _decode_final_segment(audio, pinned_lang=None, prompt=prompt, fast=fast)
     if not seg_text.strip():  # last resort: whatever the partials managed to commit
         with _state_lock:
             seg_text = _deloop((_committed + _tail).strip())
@@ -268,17 +358,24 @@ def _final_decode(audio: bytes, prompt: str = "") -> str:
 
 
 def _decode_final_segment(audio: bytes, pinned_lang: str | None,
-                          prompt: str = "") -> tuple[str, str | None]:
-    """Decode one segment with the full final-quality recipe and return
-    (deloop'd text, detected language). `pinned_lang` skips auto-detection when
-    the clip's language was already decided on an earlier window; the mix-model
-    routing below still runs for Indic segments.
+                          prompt: str = "", fast: bool = False) -> tuple[str, str | None]:
+    """Decode one segment and return (deloop'd text, detected language).
+
+    `pinned_lang` skips auto-detection when the clip's language was already
+    decided on an earlier window.
+
+    `fast` strips everything off the critical path that costs wall-clock:
+    the temperature-fallback ladder (up to six sequential re-decodes) and the
+    mix-model second pass (a transformers generate, our slowest backend). Used
+    only for the end-of-clip tail, where being late scores zero — the committed
+    windows and the speculative decode still run the full-quality recipe, so
+    the bulk of the transcript is unaffected.
     """
     forced = os.environ.get("DHWANI_LANG")
     if forced:
         # A user override is respected verbatim: single decode, no second-guess.
         try:
-            words, _ = _transcribe(audio, forced, prompt=prompt, final=True)
+            words, _ = _transcribe(audio, forced, prompt=prompt, final=True, fast=fast)
             return _deloop(_text_from(words, forced)), forced
         except Exception as exc:
             _log_error(f"finalize/forced-decode (lang={forced!r})", exc)
@@ -292,7 +389,7 @@ def _decode_final_segment(audio: bytes, pinned_lang: str | None,
     # through to the Hindi retry rather than silently returning blank — a raised
     # exception here used to be indistinguishable from "produced nothing".
     try:
-        words, raw = _transcribe(audio, lang0, prompt=prompt, final=True)
+        words, raw = _transcribe(audio, lang0, prompt=prompt, final=True, fast=fast)
         lang = pinned_lang or ("hi" if raw in _INDIC else raw)
         text = _deloop(_text_from(words, lang))
     except Exception as exc:
@@ -324,15 +421,19 @@ def _decode_final_segment(audio: bytes, pinned_lang: str | None,
     # codeswitch signal is weak: whisper often writes Hinglish clips entirely
     # in Devanagari, so true code-switch clips can look Latin-free here.
     gate = os.environ.get("DHWANI_MIX_GATE", "indic")
-    want_mix = (mix is not None and is_indic
+    want_mix = (not fast and mix is not None and is_indic
                 and (bad or gate != "codeswitch" or _has_latin(text)))
-    if bad or want_mix:
+    # On the fast path a second decode is unaffordable; only re-decode when the
+    # primary produced something unusable (blank/loop/Arabic script), where any
+    # text beats what we have.
+    if (bad and not fast) or want_mix or (bad and fast and not text):
         try:
             if want_mix and _mix_backend() == "transformers":
                 words_hi, _ = _transcribe_mix_transformers(audio)
             else:
                 kw = {"model": mix} if (want_mix and mix) else {}
-                words_hi, _ = _transcribe(audio, "hi", prompt=prompt, final=True, **kw)
+                words_hi, _ = _transcribe(audio, "hi", prompt=prompt, final=True,
+                                          fast=fast, **kw)
             candidate = _deloop(_text_from(words_hi, "hi"))
             # Mix models can verbalize digits ("334" -> "3.3 0.4", measured on
             # Apex): if the healthy primary heard a multi-digit number the
@@ -369,8 +470,14 @@ def _ntoks(text: str) -> list[str]:
     return re.findall(r"[^\W_]+", text, flags=re.UNICODE)
 
 
-def _decode_and_commit(audio: bytes, final: bool) -> None:
+def _decode_and_commit(audio: bytes, final: bool, gen: int | None = None) -> None:
     global _committed, _committed_bytes, _tail, _prev_words, _lang
+
+    def _stale() -> bool:
+        return gen is not None and gen != _clip_gen
+
+    if _stale():
+        return
 
     with _state_lock:
         start_bytes = _committed_bytes
@@ -400,8 +507,8 @@ def _decode_and_commit(audio: bytes, final: bool) -> None:
     words, _ = _transcribe(window, lang, prompt, final=final)
 
     with _state_lock:
-        if _finalizing and not final:
-            return  # a final decode already superseded this worker
+        if (_finalizing and not final) or _stale():
+            return  # a final decode, or a whole new clip, superseded this worker
 
     words = [(t, s + window_start_s, e + window_start_s) for (t, s, e) in words]
 
@@ -658,7 +765,7 @@ _FINAL_TEMPS = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
 
 
 def _transcribe(window: bytes, lang: str | None, prompt: str, final: bool = False,
-                model: str | None = None):
+                model: str | None = None, fast: bool = False):
     backend = _resolve_backend()
     if backend == "speechanalyzer":
         return _transcribe_speechanalyzer(window, final=final)
@@ -666,9 +773,13 @@ def _transcribe(window: bytes, lang: str | None, prompt: str, final: bool = Fals
     if audio.size == 0:
         return [], None
     name = model or _model_name(final)
+    # `fast` = final-quality model, but greedy: no temperature ladder. The
+    # ladder re-decodes the segment once per temperature when whisper's own
+    # thresholds fire, so it can multiply wall-clock several times over.
+    quality = final and not fast
     if backend == "mlx":
-        return _transcribe_mlx(window, lang, prompt, model_name=name, final=final)
-    return _transcribe_ctranslate2(audio, lang, prompt, model_name=name, final=final)
+        return _transcribe_mlx(window, lang, prompt, model_name=name, final=quality)
+    return _transcribe_ctranslate2(audio, lang, prompt, model_name=name, final=quality)
 
 
 # --- ctranslate2 (faster-whisper) backend — CPU-only, verified on this box --
@@ -719,19 +830,42 @@ def _transcribe_ctranslate2(audio, lang, prompt, model_name, final=False):
 
 
 def _get_model_ctranslate2(name: str):
+    """Load (once) and return the CTranslate2 model plus its serialising lock.
+
+    `device="auto"` can select a CUDA runtime that then fails to load its
+    libraries (a machine with a GPU but no cuBLAS raises
+    "Library cublas64_12.dll is not found"). That used to happen on every call,
+    since a failed load never populates the cache — so each decode retried it
+    and every final came back blank. Fall back to CPU once and remember it.
+    """
     from faster_whisper import WhisperModel
 
     with _registry_lock:
         if name not in _models:
-            device = os.environ.get("DHWANI_DEVICE", "auto")
-            compute = "int8" if device in ("cpu", "auto") else "float16"
-            _models[name] = WhisperModel(
-                name,
-                device=device,
-                compute_type=compute,
-                cpu_threads=os.cpu_count() or 4,
-            )
-            _locks[name] = threading.Lock()
+            # Default "cpu", not "auto": CTranslate2 has no Metal backend, so on
+            # the Apple-silicon scoring box "auto" is CPU anyway (there the mlx
+            # backend does the real work), while elsewhere "auto" can select a
+            # CUDA runtime whose libraries then fail mid-decode — which blanked
+            # every final on a machine with a GPU but no cuBLAS.
+            requested = os.environ.get("DHWANI_DEVICE", "cpu")
+            attempts = [requested] if requested == "cpu" else [requested, "cpu"]
+            last: Exception | None = None
+            for device in attempts:
+                compute = "int8" if device in ("cpu", "auto") else "float16"
+                try:
+                    _models[name] = WhisperModel(
+                        name,
+                        device=device,
+                        compute_type=compute,
+                        cpu_threads=os.cpu_count() or 4,
+                    )
+                    _locks[name] = threading.Lock()
+                    break
+                except Exception as exc:   # noqa: BLE001 - try the next device
+                    last = exc
+                    _log_error(f"ctranslate2 load {name!r} on device={device!r}", exc)
+            else:
+                raise last if last else RuntimeError(f"cannot load {name}")
         return _models[name], _locks[name]
 
 
@@ -1022,9 +1156,11 @@ def _maybe_speculate(audio: bytes) -> None:
     t.start()
 
 
-def _spec_take(audio: bytes) -> str | None:
+def _spec_take(audio: bytes, deadline: float | None = None) -> str | None:
     """Return the speculative final iff it covers every bit of speech in the
     clip's full audio; None means the caller must decode fresh."""
+    import time as _time
+
     if not _speculation_enabled():
         return None
     rms = _frame_rms(audio)
@@ -1039,7 +1175,10 @@ def _spec_take(audio: bytes) -> str | None:
         # the fresh decode would have to run anyway.
         if _speech_after(rms, thr, _spec_started):
             return None
-        t.join(timeout=30.0)
+        # Wait only within the caller's budget. This used to join for 30s,
+        # which on a slow speculation was itself the late final.
+        budget = 30.0 if deadline is None else max(0.0, deadline - _time.monotonic())
+        t.join(timeout=budget)
         if t.is_alive():
             return None
 
@@ -1084,9 +1223,39 @@ def _snap_end(audio: bytes, ideal_end: int, search_s: float = 1.5) -> int:
     return _even(best * fb)
 
 
+def _pause_end(audio: bytes, start: int, min_bytes: int) -> int | None:
+    """Byte offset of the most recent phrase boundary at least `min_bytes` past
+    `start`: a run of PAUSE_S silence with CHUNK_SETTLE_S of audio after it.
+    Committing at a pause keeps the uncommitted tail short — which is what the
+    end-of-clip decode has to chew through — without ever splitting a word."""
+    rms = _frame_rms(audio)
+    if rms is None:
+        return None
+    thr = _silence_threshold(rms)
+    fb = int(FRAME_S * SR) * 2
+    need = max(1, int(PAUSE_S / FRAME_S))
+    lo = (start + min_bytes) // fb
+    hi = len(rms) - int(CHUNK_SETTLE_S / FRAME_S)
+    if hi - lo < need:
+        return None
+    quiet = 0
+    for f in range(hi - 1, lo - 1, -1):     # newest boundary first
+        if rms[f] < thr:
+            quiet += 1
+            if quiet >= need:
+                return _even((f + need // 2) * fb)
+        else:
+            quiet = 0
+    return None
+
+
 def _maybe_commit_window(audio: bytes) -> None:
-    """Close and lock the next finished window in the background, if one has
-    fully arrived (a whole window plus CHUNK_SETTLE_S of audio past it)."""
+    """Close and lock the next finished window in the background.
+
+    A window closes either at the newest phrase boundary past COMMIT_MIN_S
+    (preferred — keeps the tail short and cuts on a pause), or, if the speaker
+    never pauses, at the hard CHUNK_S boundary.
+    """
     global _fc_thread, _fc_busy
     chunk = _chunk_s()
     if chunk <= 0 or _fc_busy or _spec_alive() or _finalizing:
@@ -1095,20 +1264,23 @@ def _maybe_commit_window(audio: bytes) -> None:
     settle = int(CHUNK_SETTLE_S * BYTES_PER_SEC)
     with _state_lock:
         start = _fc_bytes
-    if len(audio) - start < window_bytes + settle:
+    pause_end = _pause_end(audio, start, _even(int(COMMIT_MIN_S * BYTES_PER_SEC)))
+    if pause_end is None and len(audio) - start < window_bytes + settle:
         return
 
     _fc_busy = True
     gen = _clip_gen
 
-    def _run(buf: bytes = audio, s: int = start, g: int = gen) -> None:
+    def _run(buf: bytes = audio, s: int = start, g: int = gen,
+             pe: int | None = pause_end) -> None:
         global _fc_busy, _fc_text, _fc_bytes, _fc_lang
         try:
             with _state_lock:
                 lang, prompt = _fc_lang, _fc_text[-PROMPT_CHARS:]
-            end = _snap_end(buf, s + window_bytes)
+            end = pe if pe is not None else _snap_end(buf, s + window_bytes)
             if end <= s + int(0.5 * BYTES_PER_SEC):
                 end = _even(s + window_bytes)   # snap found nothing usable
+            end = min(end, len(buf))
             seg_text, detected = _decode_final_segment(
                 buf[s:end], pinned_lang=lang, prompt=prompt)
             with _state_lock:
