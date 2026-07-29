@@ -11,3 +11,18 @@
 [transformers] Ignoring clean_up_tokenization_spaces=True for BPE tokenizer WhisperTokenizer. The clean_up_tokenization post-processing step is designed for WordPiece tokenizers and is destructive for BPE (it strips spaces before punctuation). Set clean_up_tokenization_spaces=False to suppress this warning, or set clean_up_tokenization_spaces_for_bpe_even_though_it_will_corrupt_output=True to force cleanup anyway.
   fleurs_hi_in_test_1666            58.9/70 m0.78  (179s)
   fleurs_hi_in_test_1718            57.9/70 m0.76  (232s)
+  fleurs_hi_in_test_1778            49.6/70 m0.59  (60s)
+  fleurs_hi_in_test_1827            59.0/70 m0.78  (60s)
+  fleurs_hi_in_test_1981            60.4/70 m0.81  (67s)
+  openslr104_hi_en_103085_w5Jyq3    63.2/70 m0.86  (61s)
+  fleurs_en_us_test_1675            35.0/70 m0.91  FLIP  (30s)
+  fleurs_en_us_test_1950            35.0/70 m0.94  FLIP  (33s)
+  openslr104_hi_en_103085_w5Jyq3    58.9/70 m0.78  (73s)
+  openslr104_hi_en_103085_w5Jyq3    54.2/70 m0.68  (63s)
+
+SHIPPED CONFIG: 57.99/70   fact flips 2/15
+   fleurs_english            58.23/70  (7 clips)
+   fleurs_hindi              57.18/70  (5 clips)
+   openslr104_hinglish       58.78/70  (3 clips)
+
+baseline that scored 62.51 (turbo greedy, no router): 49.43/70, 6 flips

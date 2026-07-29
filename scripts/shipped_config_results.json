@@ -1,0 +1,126 @@
+{
+ "mean": 57.98866666666667,
+ "flips": 2,
+ "clips": [
+  {
+   "id": "fleurs_en_us_test_1674",
+   "cat": "fleurs_english",
+   "pts": 66.88,
+   "flip": false,
+   "meaning": 0.938,
+   "pred": "In some areas boiling water for a minute is enough and others several minutes are needed."
+  },
+  {
+   "id": "fleurs_en_us_test_1728",
+   "cat": "fleurs_english",
+   "pts": 66.67,
+   "flip": false,
+   "meaning": 0.933,
+   "pred": "The cabbage juice changes colors depending on how acidic or basic alkaline the chemical is."
+  },
+  {
+   "id": "fleurs_en_us_test_1802",
+   "cat": "fleurs_english",
+   "pts": 70.0,
+   "flip": false,
+   "meaning": 1.0,
+   "pred": "The internet combines elements of both mass and interpersonal communication."
+  },
+  {
+   "id": "fleurs_en_us_test_1904",
+   "cat": "fleurs_english",
+   "pts": 67.37,
+   "flip": false,
+   "meaning": 0.947,
+   "pred": "However, due to the slow communication channels, styles in the West could lag behind by 25 to 30 years."
+  },
+  {
+   "id": "fleurs_en_us_test_1952",
+   "cat": "fleurs_english",
+   "pts": 66.67,
+   "flip": false,
+   "meaning": 0.933,
+   "pred": "Anyone who is going to drive at high latitudes or over mountain passes should consider the possibility of snow, ice, or freezing temperatures."
+  },
+  {
+   "id": "fleurs_hi_in_test_1666",
+   "cat": "fleurs_hindi",
+   "pts": 58.89,
+   "flip": false,
+   "meaning": 0.778,
+   "pred": "अपनी सरकार के अलावा आप अन्य देशों की सरकारों की सला ले सकते हैं हाला कि उनकी सला उनके नागरिकों को ध्यान में रख कर दी जाती है"
+  },
+  {
+   "id": "fleurs_hi_in_test_1718",
+   "cat": "fleurs_hindi",
+   "pts": 57.93,
+   "flip": false,
+   "meaning": 0.759,
+   "pred": "ऐसी कोई वैश्विक परिभाशा नहीं है जिसके लिए निर्मित समान इंटीक होते हैं। कुछ कर एजंसिया 100 साल से पुराने समान को इंटीक के तौर पर परभाशित करती हैं।"
+  },
+  {
+   "id": "fleurs_hi_in_test_1778",
+   "cat": "fleurs_hindi",
+   "pts": 49.63,
+   "flip": false,
+   "meaning": 0.593,
+   "pred": "टेरी वेजन रिपोर्टों के में प्लांट में निकालने जाने वाला सफेद दुवा दिखाया गया है।"
+  },
+  {
+   "id": "fleurs_hi_in_test_1827",
+   "cat": "fleurs_hindi",
+   "pts": 59.02,
+   "flip": false,
+   "meaning": 0.78,
+   "pred": "सबसे नजदी की शिरे पर क्रिस्ट की मोटाई करीब 70 किलोमीटर और सबसे दूर के सिरे पर 100 किलोमीटर है"
+  },
+  {
+   "id": "fleurs_hi_in_test_1981",
+   "cat": "fleurs_hindi",
+   "pts": 60.43,
+   "flip": false,
+   "meaning": 0.809,
+   "pred": "यदि आप केवल शिप बोर्ड ब्रमन का उपयोग करके किनारे तक जाते हैं तो आपको एक अलग वीजा की अवशकता नहीं होगी 2009 तक"
+  },
+  {
+   "id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0000",
+   "cat": "openslr104_hinglish",
+   "pts": 63.24,
+   "flip": false,
+   "meaning": 0.865,
+   "pred": "LibreOffice Impress में एक प्रस्तुती document बनाना और बुनियादी formatting के इस spoken tutorial में आपका स्वागत है"
+  },
+  {
+   "id": "fleurs_en_us_test_1675",
+   "cat": "fleurs_english",
+   "pts": 35.0,
+   "flip": true,
+   "meaning": 0.905,
+   "pred": "All nouns alongside the words say for you always begin with a capital letter, even in the middle of a sentence."
+  },
+  {
+   "id": "fleurs_en_us_test_1950",
+   "cat": "fleurs_english",
+   "pts": 35.0,
+   "flip": true,
+   "meaning": 0.939,
+   "pred": "To the north and within easy reach is the romantic and fascinating town of Cintra and which was made famous to foreigners after a glowing account of its splendorous recorded by Lord Byron."
+  },
+  {
+   "id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0001",
+   "cat": "openslr104_hinglish",
+   "pts": 58.89,
+   "flip": false,
+   "meaning": 0.778,
+   "pred": "इस tutorial में हम impress window के भागों के बारे में सीखेंगे और कैसे slide insert करें और copy करें font तथा font को format करना सीखेंगे"
+  },
+  {
+   "id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0002",
+   "cat": "openslr104_hinglish",
+   "pts": 54.21,
+   "flip": false,
+   "meaning": 0.684,
+   "pred": "यहाँ हम अपने operating system के रूप में jnulinux और liber office version 334 का उपयोग कर रहे हैं"
+  }
+ ]
+}
