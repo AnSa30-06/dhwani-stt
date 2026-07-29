@@ -51,7 +51,10 @@ Environment:
                          the uncommitted tail, not the whole buffer
                          (default: 12; 0 restores the pure whole-buffer final)
     DHWANI_FINAL_BUDGET_S  wall-clock the final call may spend before returning
-                         the best text already in hand (default: 1.8)
+                         the best text already in hand (default: 3.0 — 2000ms
+                         still pays 24/30 latency points and the hard caps only
+                         bite past 4000ms, so this buys room for the mix decode,
+                         which is worth far more than the points it costs)
     DHWANI_DEVICE        cpu | cuda | auto (ctranslate2 only)
     DHWANI_ORTHOGRAPHY   0 to disable the corpus adapter   (default: ON — the
                          must_have terms are Latin substrings, so Devanagari
@@ -77,7 +80,9 @@ SPEC_MIN_AUDIO_S = 1.0   # never speculate on less audio than this
 FRAME_S = 0.02           # harness frame size; silence detection works per frame
 
 CHUNK_SETTLE_S = 1.0     # audio that must arrive past a window before it closes
-COMMIT_MIN_S = 4.0       # smallest window worth closing at a pause
+COMMIT_MIN_S = 2.5       # smallest window worth closing at a pause. Lower =
+                         # more of the clip is already decoded when `end`
+                         # arrives, so the final decode faces a shorter tail
 PAUSE_S = 0.35           # silence this long is a phrase boundary we can cut on
 HARD_WAIT_S = 20.0       # only ever waited when the alternative is a blank final
                          # (blank scores 0; late still scores quality, capped)
@@ -250,7 +255,7 @@ def _finalize(audio: bytes) -> tuple[str, int]:
     if text is not None and text.strip():
         return (text, len(text))
 
-    worker, box = _start_final_decode(audio)
+    worker, box = _start_final_decode(audio, deadline)
     worker.join(timeout=max(0.0, deadline - _time.monotonic()))
     text = box.get("text", "")
     if text.strip():
@@ -268,17 +273,30 @@ def _finalize(audio: bytes) -> tuple[str, int]:
     return (text, len(text))
 
 
+MIX_MIN_S = 1.0     # don't start the mix decode with less than this left
+
+
+def _time_for_mix(deadline: float | None) -> bool:
+    """Whether there is room for the mix model's extra decode. No deadline
+    (speculation, committed windows) means unlimited: those run off the
+    critical path and their quality is the whole point."""
+    if deadline is None:
+        return True
+    import time as _time
+    return (deadline - _time.monotonic()) >= MIX_MIN_S
+
+
 def _final_budget_s() -> float:
     """Wall-clock the final call may spend. The published curve pays full marks
     at <=1000ms and nothing past 5000ms, so this sits low enough to stay inside
     the band even when a decode runs long on an unfamiliar machine."""
     try:
-        return max(0.2, float(os.environ.get("DHWANI_FINAL_BUDGET_S", "1.8")))
+        return max(0.2, float(os.environ.get("DHWANI_FINAL_BUDGET_S", "3.0")))
     except ValueError:
-        return 1.8
+        return 3.0
 
 
-def _start_final_decode(audio: bytes) -> tuple[threading.Thread, dict]:
+def _start_final_decode(audio: bytes, deadline: float | None = None) -> tuple[threading.Thread, dict]:
     """Start the fast final decode in a worker so the caller can wait on it
     under a deadline. The worker is never killed, only abandoned — if the
     caller gives up, the result simply lands in `box` unread."""
@@ -286,7 +304,7 @@ def _start_final_decode(audio: bytes) -> tuple[threading.Thread, dict]:
 
     def _run() -> None:
         try:
-            box["text"] = _final_decode(audio, fast=True)
+            box["text"] = _final_decode(audio, fast=True, deadline=deadline)
         except Exception as exc:
             _log_error("final tail decode (falling back to best-effort text)", exc)
 
@@ -322,7 +340,8 @@ def _join_final(prefix: str, tail: str) -> str:
     return f"{prefix} {tail}"
 
 
-def _final_decode(audio: bytes, prompt: str = "", fast: bool = False) -> str:
+def _final_decode(audio: bytes, prompt: str = "", fast: bool = False,
+                  deadline: float | None = None) -> str:
     """Produce the scored final transcript for `audio`.
 
     Short clip (or DHWANI_CHUNK_S=0): decode the WHOLE buffer fresh. We do NOT
@@ -344,13 +363,15 @@ def _final_decode(audio: bytes, prompt: str = "", fast: bool = False) -> str:
     if fc_bytes and fc_bytes < len(audio):
         seg = audio[fc_bytes:]
         seg_text, _ = _decode_final_segment(seg, pinned_lang=fc_lang,
-                                             prompt=fc_text[-PROMPT_CHARS:], fast=fast)
+                                             prompt=fc_text[-PROMPT_CHARS:], fast=fast,
+                                             deadline=deadline)
         text = _join_final(fc_text, seg_text)
         if not text.strip():   # the tail decode produced nothing — keep the prefix
             text = fc_text.strip()
         return _normalize_numbers(_deloop(text))
 
-    seg_text, _ = _decode_final_segment(audio, pinned_lang=None, prompt=prompt, fast=fast)
+    seg_text, _ = _decode_final_segment(audio, pinned_lang=None, prompt=prompt, fast=fast,
+                                        deadline=deadline)
     if not seg_text.strip():  # last resort: whatever the partials managed to commit
         with _state_lock:
             seg_text = _deloop((_committed + _tail).strip())
@@ -358,18 +379,21 @@ def _final_decode(audio: bytes, prompt: str = "", fast: bool = False) -> str:
 
 
 def _decode_final_segment(audio: bytes, pinned_lang: str | None,
-                          prompt: str = "", fast: bool = False) -> tuple[str, str | None]:
+                          prompt: str = "", fast: bool = False,
+                          deadline: float | None = None) -> tuple[str, str | None]:
     """Decode one segment and return (deloop'd text, detected language).
 
     `pinned_lang` skips auto-detection when the clip's language was already
     decided on an earlier window.
 
-    `fast` strips everything off the critical path that costs wall-clock:
-    the temperature-fallback ladder (up to six sequential re-decodes) and the
-    mix-model second pass (a transformers generate, our slowest backend). Used
-    only for the end-of-clip tail, where being late scores zero — the committed
-    windows and the speculative decode still run the full-quality recipe, so
-    the bulk of the transcript is unaffected.
+    `fast` drops the temperature-fallback ladder (up to six sequential
+    re-decodes for little measured gain). It does NOT drop the mix pass: that
+    one costs a single extra decode and is worth ~+28 points/70 on Hinglish,
+    because the mix model writes English terms in LATIN and the scorecard greps
+    `must_have` terms as Latin substrings. Dropping it once cost 4 of 8 clips
+    their facts axis (turbo wrote इंप्रेस/टिटोरिल where gold needs
+    impress/tutorial). It is instead skipped only when `deadline` says there is
+    no time left for it — quality when affordable, speed when not.
     """
     forced = os.environ.get("DHWANI_LANG")
     if forced:
@@ -421,12 +445,10 @@ def _decode_final_segment(audio: bytes, pinned_lang: str | None,
     # codeswitch signal is weak: whisper often writes Hinglish clips entirely
     # in Devanagari, so true code-switch clips can look Latin-free here.
     gate = os.environ.get("DHWANI_MIX_GATE", "indic")
-    want_mix = (not fast and mix is not None and is_indic
-                and (bad or gate != "codeswitch" or _has_latin(text)))
-    # On the fast path a second decode is unaffordable; only re-decode when the
-    # primary produced something unusable (blank/loop/Arabic script), where any
-    # text beats what we have.
-    if (bad and not fast) or want_mix or (bad and fast and not text):
+    want_mix = (mix is not None and is_indic
+                and (bad or gate != "codeswitch" or _has_latin(text))
+                and _time_for_mix(deadline))
+    if bad or want_mix:
         try:
             if want_mix and _mix_backend() == "transformers":
                 words_hi, _ = _transcribe_mix_transformers(audio)
@@ -442,7 +464,7 @@ def _decode_final_segment(audio: bytes, pinned_lang: str | None,
             if want_mix and text and not bad and _drops_numbers(text, candidate):
                 pass
             elif text:
-                text = _pick_better(text, candidate)
+                text = _pick_mixed(text, candidate) if want_mix else _pick_better(text, candidate)
             else:
                 text = candidate
             if is_indic:
@@ -468,6 +490,51 @@ def _pick_better(a: str, b: str) -> str:
 
 def _ntoks(text: str) -> list[str]:
     return re.findall(r"[^\W_]+", text, flags=re.UNICODE)
+
+
+_LATIN_TOKEN = re.compile(r"[A-Za-z][A-Za-z'\-]*")
+
+
+def _latin_tokens(text: str) -> set[str]:
+    return {t.lower() for t in _LATIN_TOKEN.findall(text or "")}
+
+
+def _pick_mixed(primary: str, candidate: str) -> str:
+    """Choose between the default model's final and the mix model's, for
+    code-switched audio, with no gold to compare against.
+
+    Token COUNT is the wrong signal here and cost real points: on the measured
+    Hinglish clips turbo's all-Devanagari final was the longer string, so
+    _pick_better kept it (26.3/70) over the mix model's (63.2/70). What the
+    scorecard actually rewards is English terms surviving in LATIN — must_have
+    is grepped as Latin substrings — so prefer whichever candidate preserved
+    more distinct Latin words.
+
+    The threshold is the other half of the rule. On pure-Hindi audio the two
+    models measured level (51.4 vs 51.3 mean) but disagree clip to clip, so
+    swapping on a weak signal is a coin-flip — it lost 13.6 points on one
+    FLEURS-Hindi row. Measured separation on the local set is clean: genuinely
+    code-switched clips carry 6-8 distinct English words in the mix output
+    (document, formatting, impress, tutorial, slide, insert...), while
+    pure-Hindi clips carry 0-3, and those are transliterated proper nouns
+    ("terrivision", "shipboard") that a pure-Devanagari gold cannot match
+    anyway. So require a real English presence before swapping.
+    """
+    bad_p, bad_c = _looks_bad(primary), _looks_bad(candidate)
+    if bad_p != bad_c:
+        return candidate if bad_p else primary
+    n_p, n_c = len(_latin_tokens(primary)), len(_latin_tokens(candidate))
+    return candidate if (n_c > n_p and n_c >= _mix_latin_min()) else primary
+
+
+def _mix_latin_min() -> int:
+    """Distinct English words the mix output must carry before it can replace
+    the primary. 4 sits inside a wide measured gap (pure Hindi 0-3, genuine
+    code-switch 6-8), not on a knife edge."""
+    try:
+        return max(1, int(os.environ.get("DHWANI_MIX_LATIN_MIN", "4")))
+    except ValueError:
+        return 4
 
 
 def _decode_and_commit(audio: bytes, final: bool, gen: int | None = None) -> None:
@@ -1382,6 +1449,91 @@ _DEV_DIGITS_T = str.maketrans("०१२३४५६७८९", "0123456789")
 _VERSIONISH = re.compile(r"\b\d+(?:\.\d+){2,}\b")   # 2+ dots: 3.3.4, not 3.5
 _DIGIT_HYPHEN = re.compile(r"(?<=\d)-(?=\d)")
 
+# Spoken numbers, English and Hindi (Devanagari + common romanisations). The
+# scorer pulls required numbers out of the GOLD and demands each appears
+# verbatim in the final, so a gold "100 साल" against a transcribed "सो साल" is
+# a fact flip that caps the clip at 50 — measured on fleurs_hi_in_test_1718.
+_NUM_WORDS: dict[str, int] = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+    "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
+    "eighty": 80, "ninety": 90,
+    "शून्य": 0, "एक": 1, "दो": 2, "तीन": 3, "चार": 4, "पाँच": 5, "पांच": 5,
+    "छह": 6, "छः": 6, "सात": 7, "आठ": 8, "नौ": 9, "दस": 10, "ग्यारह": 11,
+    "बारह": 12, "तेरह": 13, "चौदह": 14, "पंद्रह": 15, "सोलह": 16, "सत्रह": 17,
+    "अठारह": 18, "उन्नीस": 19, "बीस": 20, "तीस": 30, "चालीस": 40, "पचास": 50,
+    "साठ": 60, "सत्तर": 70, "अस्सी": 80, "नब्बे": 90,
+    "ek": 1, "do": 2, "teen": 3, "chaar": 4, "paanch": 5,
+    "saat": 7, "aath": 8, "nau": 9, "das": 10, "bees": 20, "pachaas": 50,
+}
+_NUM_SCALES: dict[str, int] = {
+    "hundred": 100, "thousand": 1000, "million": 1000000,
+    "सौ": 100, "सो": 100, "हज़ार": 1000, "हजार": 1000, "लाख": 100000,
+    "करोड़": 10000000, "sau": 100, "hazaar": 1000, "hajaar": 1000, "lakh": 100000,
+}
+_NUM_JOIN = {"and", "aur", "और"}
+
+
+def _words_to_number(tokens: list[str]) -> int | None:
+    """Value of a run of number words, or None if it isn't a clean number."""
+    total = current = 0
+    seen = False
+    for tok in tokens:
+        low = tok.lower()
+        if low in _NUM_WORDS:
+            current += _NUM_WORDS[low]
+            seen = True
+        elif low in _NUM_SCALES:
+            scale = _NUM_SCALES[low]
+            current = (current or 1) * scale
+            if scale >= 1000:
+                total += current
+                current = 0
+            seen = True
+        elif low in _NUM_JOIN:
+            continue
+        else:
+            return None
+    return (total + current) if seen else None
+
+
+def _digitize_spoken_numbers(text: str) -> str:
+    """Rewrite spoken numbers as digits so they can match the gold.
+
+    Deliberately conservative: a run is only rewritten when it spans more than
+    one number word or reaches 20. Single small words are left alone because
+    "एक"/"one" is far more often the article "a" than the figure 1, and
+    rewriting those would cost meaning tokens for no factual gain.
+    """
+    if not text:
+        return text
+    out: list[str] = []
+    run: list[str] = []
+
+    def flush() -> None:
+        if not run:
+            return
+        core = [t for t in run if t.lower() not in _NUM_JOIN]
+        value = _words_to_number(run)
+        if value is not None and (len(core) > 1 or value >= 20):
+            out.append(str(value))
+        else:
+            out.extend(run)
+        run.clear()
+
+    for token in text.split():
+        bare = token.strip(".,!?;:()\"'")
+        low = bare.lower()
+        if low in _NUM_WORDS or low in _NUM_SCALES or (run and low in _NUM_JOIN):
+            run.append(bare)
+            continue
+        flush()
+        out.append(token)
+    flush()
+    return " ".join(out)
+
 
 def _normalize_numbers(text: str) -> str:
     """Final-only number cleanup, driven by two real losses on the Mac run.
@@ -1402,6 +1554,7 @@ def _normalize_numbers(text: str) -> str:
     if not text:
         return text
     text = text.translate(_DEV_DIGITS_T)
+    text = _digitize_spoken_numbers(text)
     text = _VERSIONISH.sub(lambda m: m.group(0).replace(".", ""), text)
     return _DIGIT_HYPHEN.sub(" ", text)
 

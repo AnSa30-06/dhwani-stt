@@ -113,10 +113,11 @@ def test_resumed_speech_invalidates_speculation(engine):
     feed_partials(audio)                 # the resumed speech arrives
 
     text, _ = D.draft(audio, True)
-    # the fake emits one word per second of window: the full 4s clip decodes to
-    # 4 words, the stale 3s speculation to 3 — the final must reflect all 4s.
-    assert text == D._final_decode(audio)
-    assert len(text.split()) == 4
+    # The fake emits one word per second of window, so the full 4s clip yields
+    # 4 words and the stale 3s speculation only 3. Assert COVERAGE rather than
+    # equality with a re-decode: a committer may legitimately have locked part
+    # of the clip by now, so re-running _final_decode is a moving target.
+    assert len(text.split()) == 4, f"final did not cover the resumed speech: {text!r}"
 
 
 def test_speculation_never_arms_on_pure_silence(engine):
@@ -569,9 +570,12 @@ def test_tail_decode_uses_the_fast_path(monkeypatch):
     assert any(not r["fast"] for r in record), "quality path lost its ladder"
 
 
-def test_fast_path_skips_the_mix_model(monkeypatch):
-    """The mix model is a second decode on our slowest backend; it must never
-    run on the critical path."""
+def test_fast_path_still_runs_the_mix_model(monkeypatch):
+    """The mix model must run even on the fast path. It writes English terms in
+    LATIN, and the scorecard greps must_have terms as Latin substrings — with
+    turbo alone the Hinglish clips wrote इंप्रेस/टिटोरिल for impress/tutorial
+    and lost the whole facts axis. `fast` drops the temperature ladder, not
+    this."""
     monkeypatch.delenv("DHWANI_LANG", raising=False)
     monkeypatch.setenv("DHWANI_MIX_MODEL", "someone/mix-model")
     monkeypatch.setattr(D, "_transcribe", make_fake_devanagari())
@@ -581,11 +585,41 @@ def test_fast_path_skips_the_mix_model(monkeypatch):
     D.draft_reset()
 
     D._final_decode(speech(3.0), fast=True)
-    assert not called, "fast path invoked the mix model"
+    assert called, "fast path dropped the mix model — that is the 4-clip bug"
+
+
+def test_mix_model_skipped_only_when_the_deadline_is_spent(monkeypatch):
+    """Quality when affordable, speed when not: with no time left the extra
+    decode is skipped rather than blowing the budget."""
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "someone/mix-model")
+    monkeypatch.setattr(D, "_transcribe", make_fake_devanagari())
+    called: list = []
+    monkeypatch.setattr(D, "_transcribe_mix_transformers",
+                        lambda window: (called.append(1) or [(" mix", 0.0, 1.0)], "hi"))
 
     D.draft_reset()
-    D._final_decode(speech(3.0), fast=False)
-    assert called, "quality path lost the mix model"
+    D._final_decode(speech(3.0), fast=True, deadline=time.monotonic() - 1)
+    assert not called, "ran the mix decode with the deadline already blown"
+
+    D.draft_reset()
+    D._final_decode(speech(3.0), fast=True, deadline=time.monotonic() + 30)
+    assert called, "skipped the mix decode despite ample time"
+
+
+def test_spoken_numbers_become_digits():
+    """The scorer requires each gold number verbatim; a spoken "सौ साल" against
+    a gold "100 साल" is a fact flip. Measured on fleurs_hi_in_test_1718."""
+    n = D._normalize_numbers
+    assert "100" in n("कुछ कर एजंसिया सो साल से")
+    assert "25" in n("twenty five to thirty") and "30" in n("twenty five to thirty")
+    assert "334" in n("three hundred thirty four")
+    assert "2020" in n("do hazaar bees")
+    # conservative: a lone small number word is far more often an article
+    assert "एक" in n("एक प्रस्तुति document")
+    assert "one" in n("I have one idea")
+    # already-digit text is left alone
+    assert n("version 334 ka upyog") == "version 334 ka upyog"
 
 
 def test_commits_at_a_pause_keep_the_tail_short(monkeypatch):
