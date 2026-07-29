@@ -1,0 +1,19 @@
+5 clips with audio: {'fleurs_hindi': 5}
+
+=== hindimedium ===
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/947 [00:00<?, ?it/s]Loading weights: 100%|██████████| 947/947 [00:00<00:00, 10433.04it/s]
+  loaded in 310s
+[transformers] A custom logits processor of type <class 'transformers.generation.logits_process.SuppressTokensLogitsProcessor'> has been passed to `.generate()`, but it was also created in `.generate()`, given its parameterization. The custom <class 'transformers.generation.logits_process.SuppressTokensLogitsProcessor'> will take precedence. Please check the docstring of <class 'transformers.generation.logits_process.SuppressTokensLogitsProcessor'> to see related `.generate()` flags.
+[transformers] A custom logits processor of type <class 'transformers.generation.logits_process.SuppressTokensAtBeginLogitsProcessor'> has been passed to `.generate()`, but it was also created in `.generate()`, given its parameterization. The custom <class 'transformers.generation.logits_process.SuppressTokensAtBeginLogitsProcessor'> will take precedence. Please check the docstring of <class 'transformers.generation.logits_process.SuppressTokensAtBeginLogitsProcessor'> to see related `.generate()` flags.
+  fleurs_hi_in_test_1666                63.6/70  meaning 0.87  (417.4s)
+  fleurs_hi_in_test_1718                63.5/70  meaning 0.87  (288.6s)
+  fleurs_hi_in_test_1778                47.6/70  meaning 0.55  (147.6s)
+  fleurs_hi_in_test_1827                60.9/70  meaning 0.82  (148.0s)
+  fleurs_hi_in_test_1981                61.2/70  meaning 0.82  (199.3s)
+
+=== per-category quality (points/70, mean) ===
+model            fleurs_hindi   OVERALL
+hindimedium               59.37     59.37
+
+wrote D:\to-drive\complisutra desktop\dhwani\builderr-speech-to-text\scripts\hindi_medium.json

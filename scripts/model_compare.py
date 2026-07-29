@@ -97,9 +97,11 @@ class TurboCT2:
         self.m = WhisperModel(self.model_id, device="cpu", compute_type="int8",
                               cpu_threads=os.cpu_count() or 4)
 
+    beam = int(os.environ.get("PROBE_BEAM", "1"))
+
     def decode(self, audio, lang):
         segs, info = self.m.transcribe(
-            audio, language=lang, task="transcribe", beam_size=1,
+            audio, language=lang, task="transcribe", beam_size=self.beam,
             condition_on_previous_text=False,
             temperature=list(D._FINAL_TEMPS),
             compression_ratio_threshold=2.4, log_prob_threshold=-1.0,
@@ -130,7 +132,18 @@ class HFWhisper:
         if lang:
             kw["language"] = lang
         with t.inference_mode():
-            ids = self.m.generate(feats, **kw)
+            try:
+                ids = self.m.generate(feats, **kw)
+            except ValueError as exc:
+                # Some fine-tunes ship a pre-2023 generation_config that cannot
+                # accept task/language kwargs. Retrying bare is NOT a silent
+                # degradation: the checkpoint is already single-language, so the
+                # kwargs were redundant. Without this the model returns nothing
+                # and scores 0.00, which reads as "bad model" rather than
+                # "never ran" -- the exact trap this repo hit before.
+                if "generation config is outdated" not in str(exc):
+                    raise
+                ids = self.m.generate(feats)
         text = self.proc.batch_decode(ids, skip_special_tokens=True)[0].strip()
         return text, lang  # transformers generate doesn't surface detected lang simply
 
@@ -210,6 +223,14 @@ MODELS = {
     # untested lever.
     "hindilarge": lambda: HFWhisper("hindilarge", "vasista22/whisper-hindi-large-v2",
                                     "MIT (check card)"),
+    # Medium-sized Hindi candidates. Size matters as much as score: the shipped
+    # mix model (zero-stt) is medium-class, so a medium Hindi model REPLACES it
+    # on pure-Hindi clips at the same cost -- latency-neutral. large-v2 measured
+    # +4.7 on one clip but at 793s/clip it could never ship.
+    "hindimedium": lambda: HFWhisper("hindimedium", "vasista22/whisper-hindi-medium",
+                                     "MIT (check card)"),
+    "indicwhisper": lambda: HFWhisper("indicwhisper", "parthiv11/indic_whisper_nodcil",
+                                      "check card"),
     "zerostt": lambda: HFWhisper("zerostt", "shunyalabs/zero-stt-hinglish",
                                  "OpenRAIL"),
 }

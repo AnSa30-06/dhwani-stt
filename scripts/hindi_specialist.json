@@ -1,0 +1,76 @@
+{
+ "hindilarge": {
+  "clips": [
+   {
+    "points": 0.0,
+    "meaning": 0.0,
+    "wer": 1.0,
+    "flipped": false,
+    "reasons": [
+     "blank final"
+    ],
+    "clip_id": "fleurs_hi_in_test_1666",
+    "category": "fleurs_hindi",
+    "pred": "",
+    "decode_s": 0.1
+   },
+   {
+    "points": 0.0,
+    "meaning": 0.0,
+    "wer": 1.0,
+    "flipped": true,
+    "reasons": [
+     "number changed/dropped",
+     "negation polarity flipped",
+     "blank final"
+    ],
+    "clip_id": "fleurs_hi_in_test_1718",
+    "category": "fleurs_hindi",
+    "pred": "",
+    "decode_s": 0.0
+   },
+   {
+    "points": 0.0,
+    "meaning": 0.0,
+    "wer": 1.0,
+    "flipped": false,
+    "reasons": [
+     "blank final"
+    ],
+    "clip_id": "fleurs_hi_in_test_1778",
+    "category": "fleurs_hindi",
+    "pred": "",
+    "decode_s": 0.0
+   },
+   {
+    "points": 0.0,
+    "meaning": 0.0,
+    "wer": 1.0,
+    "flipped": true,
+    "reasons": [
+     "number changed/dropped",
+     "blank final"
+    ],
+    "clip_id": "fleurs_hi_in_test_1827",
+    "category": "fleurs_hindi",
+    "pred": "",
+    "decode_s": 0.0
+   },
+   {
+    "points": 0.0,
+    "meaning": 0.0,
+    "wer": 1.0,
+    "flipped": true,
+    "reasons": [
+     "number changed/dropped",
+     "negation polarity flipped",
+     "blank final"
+    ],
+    "clip_id": "fleurs_hi_in_test_1981",
+    "category": "fleurs_hindi",
+    "pred": "",
+    "decode_s": 0.0
+   }
+  ]
+ }
+}

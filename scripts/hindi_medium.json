@@ -1,0 +1,61 @@
+{
+ "hindimedium": {
+  "clips": [
+   {
+    "points": 63.64,
+    "meaning": 0.873,
+    "wer": 0.231,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_hi_in_test_1666",
+    "category": "fleurs_hindi",
+    "pred": "<|startoftranscript|><|hi|><|transcribe|><|notimestamps|>अपनी सरकार के अलावा, अन्य देशों की सरकारों की सलाह ले सकते हैं, हालाँकि उनकी सलाह उनके नागरिकों को ध्यान में रखकर दी जाती है.",
+    "decode_s": 417.4
+   },
+   {
+    "points": 63.55,
+    "meaning": 0.871,
+    "wer": 0.207,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_hi_in_test_1718",
+    "category": "fleurs_hindi",
+    "pred": "<|startoftranscript|><|hi|><|transcribe|><|notimestamps|>ऐसी कोई वैश्विक परिभाषा नहीं है जिसके लिए निर्मित सामान ऐंटीक होते हैं. कुछ कर एजेंसियाँ 100 साल से पुराने सामान को ऐंटीक के तौर पर परिभाषित करती हैं.",
+    "decode_s": 288.6
+   },
+   {
+    "points": 47.59,
+    "meaning": 0.552,
+    "wer": 0.75,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_hi_in_test_1778",
+    "category": "fleurs_hindi",
+    "pred": "<|startoftranscript|><|hi|><|transcribe|><|notimestamps|>टेरीवेज़न रिपोर्टों में प्लांट में निकालने जाने वाला सफेद धुआं दिखाया गया है.",
+    "decode_s": 147.6
+   },
+   {
+    "points": 60.91,
+    "meaning": 0.818,
+    "wer": 0.333,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_hi_in_test_1827",
+    "category": "fleurs_hindi",
+    "pred": "<|startoftranscript|><|hi|><|transcribe|><|notimestamps|>सबसे नज़दीकी सिरे पर क्रिस्ट की मोटाई करीब 70 किलोमीटर और सबसे दूर के सिरे पर 100 किलोमीटर है.",
+    "decode_s": 148.0
+   },
+   {
+    "points": 61.18,
+    "meaning": 0.824,
+    "wer": 0.304,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_hi_in_test_1981",
+    "category": "fleurs_hindi",
+    "pred": "<|startoftranscript|><|hi|><|transcribe|><|notimestamps|>यदि आप केवल शिप बोर्ड ब्राह्मण का उपयोग करके किनारे तक जाते हैं, तो आपको एक अलग वीज़ा की आवश्यकता नहीं होगी, 2009 तक.",
+    "decode_s": 199.3
+   }
+  ]
+ }
+}

@@ -1,0 +1,8 @@
+5 clips with audio: {'fleurs_hindi': 5}
+
+=== hindilarge ===
+Loading weights:   0%|          | 0/1259 [00:00<?, ?it/s]Loading weights: 100%|██████████| 1259/1259 [00:00<00:00, 26390.48it/s]
+  loaded in 16s
+[transformers] A custom logits processor of type <class 'transformers.generation.logits_process.SuppressTokensLogitsProcessor'> has been passed to `.generate()`, but it was also created in `.generate()`, given its parameterization. The custom <class 'transformers.generation.logits_process.SuppressTokensLogitsProcessor'> will take precedence. Please check the docstring of <class 'transformers.generation.logits_process.SuppressTokensLogitsProcessor'> to see related `.generate()` flags.
+[transformers] A custom logits processor of type <class 'transformers.generation.logits_process.SuppressTokensAtBeginLogitsProcessor'> has been passed to `.generate()`, but it was also created in `.generate()`, given its parameterization. The custom <class 'transformers.generation.logits_process.SuppressTokensAtBeginLogitsProcessor'> will take precedence. Please check the docstring of <class 'transformers.generation.logits_process.SuppressTokensAtBeginLogitsProcessor'> to see related `.generate()` flags.
+  fleurs_hi_in_test_1666                63.6/70  meaning 0.87  (793.1s)

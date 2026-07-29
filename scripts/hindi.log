@@ -1,0 +1,27 @@
+5 clips with audio: {'fleurs_hindi': 5}
+
+=== hindilarge ===
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/1259 [00:00<?, ?it/s]Loading weights: 100%|██████████| 1259/1259 [00:00<00:00, 27939.24it/s]
+  loaded in 515s
+    [auto pass failed: ValueError: The generation config is outdated and is thus not compatible with the `task` argument to `generate`. Please update the generation config as per the instructions https://github.com/huggingface/transformers/issues/25084#issuecomment-1664398224]
+    [hi retry failed: ValueError: The generation config is outdated and is thus not compatible with the `language` argument to `generate`. Please update the generation config as per the instructions https://github.com/huggingface/transformers/issues/25084#issuecomment-1664398224]
+  fleurs_hi_in_test_1666                 0.0/70  meaning 0.00  (0.1s)
+    [auto pass failed: ValueError: The generation config is outdated and is thus not compatible with the `task` argument to `generate`. Please update the generation config as per the instructions https://github.com/huggingface/transformers/issues/25084#issuecomment-1664398224]
+    [hi retry failed: ValueError: The generation config is outdated and is thus not compatible with the `language` argument to `generate`. Please update the generation config as per the instructions https://github.com/huggingface/transformers/issues/25084#issuecomment-1664398224]
+  fleurs_hi_in_test_1718                 0.0/70  meaning 0.00  FLIP (0.0s)
+    [auto pass failed: ValueError: The generation config is outdated and is thus not compatible with the `task` argument to `generate`. Please update the generation config as per the instructions https://github.com/huggingface/transformers/issues/25084#issuecomment-1664398224]
+    [hi retry failed: ValueError: The generation config is outdated and is thus not compatible with the `language` argument to `generate`. Please update the generation config as per the instructions https://github.com/huggingface/transformers/issues/25084#issuecomment-1664398224]
+  fleurs_hi_in_test_1778                 0.0/70  meaning 0.00  (0.0s)
+    [auto pass failed: ValueError: The generation config is outdated and is thus not compatible with the `task` argument to `generate`. Please update the generation config as per the instructions https://github.com/huggingface/transformers/issues/25084#issuecomment-1664398224]
+    [hi retry failed: ValueError: The generation config is outdated and is thus not compatible with the `language` argument to `generate`. Please update the generation config as per the instructions https://github.com/huggingface/transformers/issues/25084#issuecomment-1664398224]
+  fleurs_hi_in_test_1827                 0.0/70  meaning 0.00  FLIP (0.0s)
+    [auto pass failed: ValueError: The generation config is outdated and is thus not compatible with the `task` argument to `generate`. Please update the generation config as per the instructions https://github.com/huggingface/transformers/issues/25084#issuecomment-1664398224]
+    [hi retry failed: ValueError: The generation config is outdated and is thus not compatible with the `language` argument to `generate`. Please update the generation config as per the instructions https://github.com/huggingface/transformers/issues/25084#issuecomment-1664398224]
+  fleurs_hi_in_test_1981                 0.0/70  meaning 0.00  FLIP (0.0s)
+
+=== per-category quality (points/70, mean) ===
+model            fleurs_hindi   OVERALL
+hindilarge                0.00      0.00
+
+wrote D:\to-drive\complisutra desktop\dhwani\builderr-speech-to-text\scripts\hindi_specialist.json
