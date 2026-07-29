@@ -204,6 +204,12 @@ MODELS = {
     "medium": lambda: CT2Model("medium", "medium", "MIT (OpenAI weights)"),
     "apex": lambda: HFWhisper("apex", "Oriserve/Whisper-Hindi2Hinglish-Apex",
                               "Apache-2.0"),
+    # Hindi is the weakest category (57.18/70) and is limited by meaning, not
+    # fact flips -- both current models sit near 51 raw on pure Hindi, so
+    # neither is actually good at it. A Hindi-specialist fine-tune is the
+    # untested lever.
+    "hindilarge": lambda: HFWhisper("hindilarge", "vasista22/whisper-hindi-large-v2",
+                                    "MIT (check card)"),
     "zerostt": lambda: HFWhisper("zerostt", "shunyalabs/zero-stt-hinglish",
                                  "OpenRAIL"),
 }
