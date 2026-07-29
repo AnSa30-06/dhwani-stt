@@ -36,6 +36,9 @@ Environment:
     DHWANI_BACKEND       auto | mlx | ctranslate2          (default: auto)
     DHWANI_MODEL         model size/repo for the final      (default: large-v3-turbo)
     DHWANI_DRAFT_MODEL   cheaper size/repo for partials     (default: small)
+    DHWANI_BEAM          beam width for the scored final (default: 5; measured
+                         +4.97/70 on the English clips over greedy, one fewer
+                         fact flip). 1 restores greedy.
     DHWANI_EN_MODEL      optional stronger checkpoint for ENGLISH finals; they
                          never pay for the mix decode, so they have budget to
                          spare (unset = use DHWANI_MODEL)
@@ -890,6 +893,21 @@ def _detect_language_ctranslate2(audio: bytes) -> str | None:
     return "hi" if lang in _INDIC else lang
 
 
+def _beam_size(final: bool) -> int:
+    """Beam width for the scored final. Greedy (1) was costing real points:
+    measured on the English clips, beam 5 recovered a rare word the greedy
+    decode misheard ("alkaline" -> "acolyte") and took the set from 53.26 to
+    58.23 of 70, one fewer fact flip. A flip caps its clip at 50, so this is
+    worth far more than the extra decode time. Partials stay greedy — they are
+    unscored and must not steal the accelerator."""
+    if not final:
+        return 1
+    try:
+        return max(1, int(os.environ.get("DHWANI_BEAM", "5")))
+    except ValueError:
+        return 5
+
+
 def _transcribe_ctranslate2(audio, lang, prompt, model_name, final=False):
     model, lock = _get_model_ctranslate2(model_name)
     extra = dict(
@@ -903,7 +921,7 @@ def _transcribe_ctranslate2(audio, lang, prompt, model_name, final=False):
             audio,
             language=lang,
             task="transcribe",
-            beam_size=1,
+            beam_size=_beam_size(final),
             condition_on_previous_text=False,
             word_timestamps=True,
             initial_prompt=prompt or None,
@@ -1022,6 +1040,10 @@ def _transcribe_mlx(window: bytes, lang: str | None, prompt: str, model_name: st
         word_timestamps=True,
         initial_prompt=prompt or None,
     )
+    if final and _beam_size(True) > 1:
+        # mlx_whisper exposes beam search on some versions only; the TypeError
+        # guard below drops it rather than losing the decode.
+        kwargs["beam_size"] = _beam_size(True)
     if final:
         kwargs.update(
             temperature=_FINAL_TEMPS,
