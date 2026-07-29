@@ -90,7 +90,8 @@ def main():
         t1 = time.time()
         for clip in clips:
             params = dict(language="en", task="transcribe",
-                          condition_on_previous_text=False, **kw)
+                          condition_on_previous_text=False)
+            params.update(kw)   # a variant may override the defaults above
             segs, _ = model.transcribe(clip["audio"], **params)
             pred = " ".join(s.text.strip() for s in segs).strip()
             pts, fl, mean = score(clip, pred)

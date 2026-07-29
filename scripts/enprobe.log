@@ -1,0 +1,29 @@
+7 English clips; model=large-v3-turbo
+
+loaded in 48s
+
+=== greedy (current)  mean 53.26/70  flips 3/7  (208s)
+    1728  35.0 MISSING ['alkaline']
+    1675  35.0 MISSING ['Sie']
+    1950  35.0 MISSING ['Sintra', 'splendours']
+
+=== beam5  mean 58.23/70  flips 2/7  (285s)
+    1675  35.0 MISSING ['Sie']
+    1950  35.0 MISSING ['Sintra', 'splendours']
+
+=== beam5+ladder  mean 58.23/70  flips 2/7  (209s)
+    1675  35.0 MISSING ['Sie']
+    1950  35.0 MISSING ['Sintra', 'splendours']
+
+=== beam10  mean 58.23/70  flips 2/7  (151s)
+    1675  35.0 MISSING ['Sie']
+    1950  35.0 MISSING ['Sintra', 'splendours']
+
+Traceback (most recent call last):
+  File "D:\to-drive\complisutra desktop\dhwani\builderr-speech-to-text\scripts\english_probe.py", line 123, in <module>
+    main()
+    ~~~~^^
+  File "D:\to-drive\complisutra desktop\dhwani\builderr-speech-to-text\scripts\english_probe.py", line 92, in main
+    params = dict(language="en", task="transcribe",
+                  condition_on_previous_text=False, **kw)
+TypeError: dict() got multiple values for keyword argument 'condition_on_previous_text'

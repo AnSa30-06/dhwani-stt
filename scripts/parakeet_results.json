@@ -1,0 +1,73 @@
+{
+ "mean": 53.57142857142857,
+ "flips": 3,
+ "clips": [
+  {
+   "id": "fleurs_en_us_test_1674",
+   "pts": 70.0,
+   "flip": false,
+   "meaning": 1.0,
+   "missing": [],
+   "pred": "In some areas boiling water for a minute is enough, in others several minutes are needed.",
+   "secs": 68.2
+  },
+  {
+   "id": "fleurs_en_us_test_1728",
+   "pts": 63.33,
+   "flip": false,
+   "meaning": 0.867,
+   "missing": [],
+   "pred": "The cabbage juice changes colors depending on how acidic or basic alkaline that chemical is.",
+   "secs": 5.2
+  },
+  {
+   "id": "fleurs_en_us_test_1802",
+   "pts": 70.0,
+   "flip": false,
+   "meaning": 1.0,
+   "missing": [],
+   "pred": "The Internet combines elements of both mass and interpersonal communication.",
+   "secs": 1.3
+  },
+  {
+   "id": "fleurs_en_us_test_1904",
+   "pts": 35.0,
+   "flip": true,
+   "meaning": 0.919,
+   "missing": [],
+   "pred": "However, due to the slow communication channels, styles in the west could lag behind by 25-30 years.",
+   "secs": 2.7
+  },
+  {
+   "id": "fleurs_en_us_test_1952",
+   "pts": 66.67,
+   "flip": false,
+   "meaning": 0.933,
+   "missing": [],
+   "pred": "Anyone who is going to drive at high latitudes or over mountain passes should consider the possibility of snow, ice or freezing temperatures.",
+   "secs": 2.2
+  },
+  {
+   "id": "fleurs_en_us_test_1675",
+   "pts": 35.0,
+   "flip": true,
+   "meaning": 0.905,
+   "missing": [
+    "Sie"
+   ],
+   "pred": "All nouns alongside the words save for you always begin with a capital letter, even in the middle of a sentence.",
+   "secs": 1.2
+  },
+  {
+   "id": "fleurs_en_us_test_1950",
+   "pts": 35.0,
+   "flip": true,
+   "meaning": 0.954,
+   "missing": [
+    "splendours"
+   ],
+   "pred": "To the north, and within easy reach, is the romantic and fascinating town of Sintra, which was made famous to foreigners after a glowing account of its splendors recorded by Lord Byron.",
+   "secs": 1.7
+  }
+ ]
+}

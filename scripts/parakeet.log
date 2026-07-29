@@ -1,0 +1,15 @@
+7 English clips; model=nemo-parakeet-tdt-0.6b-v2
+Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Fetching 5 files:  20%|██        | 1/5 [00:00<00:02,  1.83it/s]Fetching 5 files:  40%|████      | 2/5 [00:55<01:37, 32.57s/it]Fetching 5 files:  80%|████████  | 4/5 [11:27<03:30, 210.13s/it]Fetching 5 files: 100%|██████████| 5/5 [11:27<00:00, 145.19s/it]Fetching 5 files: 100%|██████████| 5/5 [11:27<00:00, 137.46s/it]
+loaded in 799s
+
+  1674  70.0/70  meaning 1.00  (68.2s)
+  1728  63.3/70  meaning 0.87  (5.2s)
+  1802  70.0/70  meaning 1.00  (1.3s)
+  1904  35.0/70  meaning 0.92  FLIP []  (2.7s)
+  1952  66.7/70  meaning 0.93  (2.2s)
+  1675  35.0/70  meaning 0.91  FLIP ['Sie']  (1.2s)
+  1950  35.0/70  meaning 0.95  FLIP ['splendours']  (1.7s)
+
+parakeet mean 53.57/70   flips 3/7
+(whisper turbo greedy on the same clips: 53.26/70, 3 flips; turbo beam5: 58.23/70, 2 flips)

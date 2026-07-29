@@ -1,0 +1,89 @@
+{
+ "largev3": {
+  "clips": [
+   {
+    "points": 63.75,
+    "meaning": 0.875,
+    "wer": 0.125,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_en_us_test_1674",
+    "category": "fleurs_english",
+    "pred": "In some areas, boiling water for a minute is enough and other several minutes are needed.",
+    "decode_s": 90.5
+   },
+   {
+    "points": 35.0,
+    "meaning": 0.897,
+    "wer": 0.133,
+    "flipped": true,
+    "reasons": [
+     "required term missing"
+    ],
+    "clip_id": "fleurs_en_us_test_1728",
+    "category": "fleurs_english",
+    "pred": "The cabbage juice changes colors depending on how acidic or basic the chemical is.",
+    "decode_s": 81.7
+   },
+   {
+    "points": 70.0,
+    "meaning": 1.0,
+    "wer": 0.0,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_en_us_test_1802",
+    "category": "fleurs_english",
+    "pred": "The Internet combines elements of both mass and interpersonal communication.",
+    "decode_s": 78.0
+   },
+   {
+    "points": 68.65,
+    "meaning": 0.973,
+    "wer": 0.053,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_en_us_test_1904",
+    "category": "fleurs_english",
+    "pred": "However, due to the slow communication channels, styles in the West could lag behind by 25 30 year.",
+    "decode_s": 122.6
+   },
+   {
+    "points": 66.67,
+    "meaning": 0.933,
+    "wer": 0.091,
+    "flipped": false,
+    "reasons": [],
+    "clip_id": "fleurs_en_us_test_1952",
+    "category": "fleurs_english",
+    "pred": "Anyone who is going to drive at high latitudes or over mountain passes should consider the possibility of snow, ice, or freezing temperatures.",
+    "decode_s": 85.5
+   },
+   {
+    "points": 35.0,
+    "meaning": 0.905,
+    "wer": 0.095,
+    "flipped": true,
+    "reasons": [
+     "required term missing"
+    ],
+    "clip_id": "fleurs_en_us_test_1675",
+    "category": "fleurs_english",
+    "pred": "All nouns alongside the world say for you always begin with a capital letter even in the middle of a sentence.",
+    "decode_s": 76.6
+   },
+   {
+    "points": 35.0,
+    "meaning": 0.97,
+    "wer": 0.03,
+    "flipped": true,
+    "reasons": [
+     "required term missing"
+    ],
+    "clip_id": "fleurs_en_us_test_1950",
+    "category": "fleurs_english",
+    "pred": "To the north and within easy reach is the romantic and fascinating town of Sintra and which was made famous to foreigners after a glowing account of its splendors recorded by Lord Byron.",
+    "decode_s": 88.3
+   }
+  ]
+ }
+}

@@ -1,0 +1,18 @@
+7 clips with audio: {'fleurs_english': 7}
+
+=== largev3 ===
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+  loaded in 397s
+  fleurs_en_us_test_1674                63.8/70  meaning 0.88  (90.5s)
+  fleurs_en_us_test_1728                35.0/70  meaning 0.90  FLIP (81.7s)
+  fleurs_en_us_test_1802                70.0/70  meaning 1.00  (78.0s)
+  fleurs_en_us_test_1904                68.7/70  meaning 0.97  (122.6s)
+  fleurs_en_us_test_1952                66.7/70  meaning 0.93  (85.5s)
+  fleurs_en_us_test_1675                35.0/70  meaning 0.91  FLIP (76.6s)
+  fleurs_en_us_test_1950                35.0/70  meaning 0.97  FLIP (88.3s)
+
+=== per-category quality (points/70, mean) ===
+model          fleurs_english   OVERALL
+largev3                53.44     53.44
+
+wrote D:\to-drive\complisutra desktop\dhwani\builderr-speech-to-text\scripts\english_largev3.json
