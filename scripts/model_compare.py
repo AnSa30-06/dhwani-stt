@@ -186,8 +186,22 @@ def quality_points(clip, pred) -> dict:
             "wer": round(err, 3), "flipped": flipped, "reasons": reasons}
 
 
+class CT2Model(TurboCT2):
+    """Any faster-whisper checkpoint, same final-quality decode settings."""
+
+    def __init__(self, name, model_id, license_str):
+        self.name, self.model_id, self.license = name, model_id, license_str
+        from faster_whisper import WhisperModel
+        self.m = WhisperModel(model_id, device="cpu", compute_type="int8",
+                              cpu_threads=os.cpu_count() or 4)
+
+
 MODELS = {
     "turbo": lambda: TurboCT2(),
+    # The English fact flips (Sie->say, Sintra->Cintra, alkaline->acolyte) are
+    # rare-word errors; a full large model is the obvious candidate to fix them.
+    "largev3": lambda: CT2Model("largev3", "large-v3", "MIT (OpenAI weights)"),
+    "medium": lambda: CT2Model("medium", "medium", "MIT (OpenAI weights)"),
     "apex": lambda: HFWhisper("apex", "Oriserve/Whisper-Hindi2Hinglish-Apex",
                               "Apache-2.0"),
     "zerostt": lambda: HFWhisper("zerostt", "shunyalabs/zero-stt-hinglish",
@@ -199,9 +213,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", nargs="+", default=list(MODELS), choices=list(MODELS))
     ap.add_argument("--limit", type=int, default=0, help="clips per category, 0=all")
+    ap.add_argument("--category", default="", help="only clips whose category contains this")
+    ap.add_argument("--out", default="model_compare_results.json")
     args = ap.parse_args()
 
     clips = load_clips()
+    if args.category:
+        clips = [c for c in clips if args.category in c["category"]]
     if args.limit:
         by_cat: dict[str, list] = {}
         for c in clips:
@@ -250,7 +268,7 @@ def main():
         overall = sum(r["points"] for r in res["clips"]) / len(res["clips"])
         print(f"{mname:8s}" + "".join(cells) + f"{overall:10.2f}")
 
-    out = Path(__file__).parent / "model_compare_results.json"
+    out = Path(__file__).parent / args.out
     json.dump(results, open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     print(f"\nwrote {out}")
 

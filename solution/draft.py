@@ -36,6 +36,9 @@ Environment:
     DHWANI_BACKEND       auto | mlx | ctranslate2          (default: auto)
     DHWANI_MODEL         model size/repo for the final      (default: large-v3-turbo)
     DHWANI_DRAFT_MODEL   cheaper size/repo for partials     (default: small)
+    DHWANI_EN_MODEL      optional stronger checkpoint for ENGLISH finals; they
+                         never pay for the mix decode, so they have budget to
+                         spare (unset = use DHWANI_MODEL)
     DHWANI_MIX_MODEL     Hindi/code-switch model for the final's Hindi path
                          (default: shunyalabs/zero-stt-hinglish, measured best
                          on Hinglish and tied with turbo on pure Hindi).
@@ -412,8 +415,14 @@ def _decode_final_segment(audio: bytes, pinned_lang: str | None,
     # raises (bad repo id, network hiccup, mlx API mismatch), log and fall
     # through to the Hindi retry rather than silently returning blank — a raised
     # exception here used to be indistinguishable from "produced nothing".
+    # Language hint from work already done: the committed windows pinned it, or
+    # the streaming partials did on the cheap draft model. Costs nothing here.
+    hint = pinned_lang or _lang
+    primary_model = _en_model() if (hint == "en" and _en_model()) else None
+
     try:
-        words, raw = _transcribe(audio, lang0, prompt=prompt, final=True, fast=fast)
+        words, raw = _transcribe(audio, lang0, prompt=prompt, final=True, fast=fast,
+                                 model=primary_model)
         lang = pinned_lang or ("hi" if raw in _INDIC else raw)
         text = _deloop(_text_from(words, lang))
     except Exception as exc:
@@ -658,6 +667,18 @@ def _model_name(final: bool) -> str:
 # no dependence on romanized gold_alternatives. Apex (Apache-2.0) measured
 # 55.79 Hinglish but 5.60 pure-Hindi: usable via env override, never default.
 DEFAULT_MIX_MODEL = "shunyalabs/zero-stt-hinglish"
+
+
+def _en_model() -> str | None:
+    """Optional stronger checkpoint for ENGLISH finals.
+
+    English clips never pay for the mix decode, so they have budget to spare --
+    and their losses are rare-word mishearings (alkaline->acolyte, Sie->say,
+    Sintra->Cintra) that each cost the whole 20-point facts axis and cap the
+    clip at 50. A bigger model is the only thing that fixes those. Unset means
+    English stays on DHWANI_MODEL.
+    """
+    return os.environ.get("DHWANI_EN_MODEL") or None
 
 
 def _mix_model() -> str | None:
