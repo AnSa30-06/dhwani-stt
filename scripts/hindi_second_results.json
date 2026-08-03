@@ -1,0 +1,57 @@
+[
+ {
+  "clip_id": "fleurs_hi_in_test_1666",
+  "primary": 58.89,
+  "specialist": 64.64,
+  "delta": 5.75,
+  "s_primary": 75.1,
+  "s_specialist": 107.5,
+  "flip_primary": false,
+  "flip_specialist": false,
+  "pred_specialist": "<|startoftranscript|><|hi|><|transcribe|><|notimestamps|>अपनी सरकार के अलावा आप अन्य देशों की सरकारों की सलाह ले सकते हैं, हालाँकि उनकी सलाह उनके नागरिकों को ध्यान में रखकर दी जाती है."
+ },
+ {
+  "clip_id": "fleurs_hi_in_test_1718",
+  "primary": 57.93,
+  "specialist": 60.32,
+  "delta": 2.39,
+  "s_primary": 36.8,
+  "s_specialist": 92.4,
+  "flip_primary": false,
+  "flip_specialist": false,
+  "pred_specialist": "<|startoftranscript|><|hi|><|transcribe|><|notimestamps|>ऐसी कोई वैश्विक परिभाषा नहीं है जिसके लिए निर्मित समान इंटीग होते हैं. कुछ कर एजेंसियाँ 100 साल से पुराने समान को इंटीग के तौर पर परिभाषित करती हैं."
+ },
+ {
+  "clip_id": "fleurs_hi_in_test_1778",
+  "primary": 49.63,
+  "specialist": 47.59,
+  "delta": -2.04,
+  "s_primary": 37.9,
+  "s_specialist": 45.9,
+  "flip_primary": false,
+  "flip_specialist": false,
+  "pred_specialist": "<|startoftranscript|><|hi|><|transcribe|><|notimestamps|>टेरीविज़न रिपोर्टों में प्लांट में निकालने जाने वाला सफेद धुआ दिखाया गया है."
+ },
+ {
+  "clip_id": "fleurs_hi_in_test_1827",
+  "primary": 59.02,
+  "specialist": 56.36,
+  "delta": -2.66,
+  "s_primary": 43.1,
+  "s_specialist": 67.3,
+  "flip_primary": false,
+  "flip_specialist": false,
+  "pred_specialist": "<|startoftranscript|><|hi|><|transcribe|><|notimestamps|>सबसे नजदीकी शिरे पर क्रिष्ट की मोटाई करीब 70 किलोमीटर और सबसे दूर के सिरे पर 100 किलोमीटर है."
+ },
+ {
+  "clip_id": "fleurs_hi_in_test_1981",
+  "primary": 60.43,
+  "specialist": 60.0,
+  "delta": -0.43,
+  "s_primary": 47.3,
+  "s_specialist": 70.4,
+  "flip_primary": false,
+  "flip_specialist": false,
+  "pred_specialist": "<|startoftranscript|><|hi|><|transcribe|><|notimestamps|>यदि आप केवल शिवबोर्ड ब्रह्मण का उपयोग करके किनारे तक जाते हैं, तो आपको एक अलग वीजा की आवश्यकता नहीं होगी 2009 तक."
+ }
+]

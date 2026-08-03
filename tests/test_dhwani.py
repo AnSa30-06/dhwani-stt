@@ -664,3 +664,287 @@ def test_speculation_and_chunking_together_stay_instant(monkeypatch):
     dt = time.monotonic() - t0
     assert dt < 0.3, f"final took {dt*1000:.0f}ms despite a ready speculation"
     assert "s60" in text
+
+
+# --- scheduling the final under a real clock --------------------------------
+
+def test_best_effort_uses_a_prefix_speculation_rather_than_return_blank():
+    """A speculation covering only a PREFIX is rejected as the scored final, but
+    in the fallback position the alternative is a blank -- and a blank scores 0,
+    the hardest cap on the card."""
+    D.draft_reset()
+    with D._state_lock:
+        D._spec_text = "the quick brown fox"
+        D._spec_covered = 5000        # a prefix; nothing committed, no partials
+    try:
+        assert D._best_effort_text().strip() == "the quick brown fox"
+    finally:
+        D.draft_reset()
+
+
+def test_warm_on_import_stays_off_outside_the_server(monkeypatch):
+    """Warming is for the sealed server process. The test suite and the offline
+    tooling import this module constantly and must never pull a model."""
+    monkeypatch.delenv("DHWANI_WARM_ON_IMPORT", raising=False)
+    monkeypatch.setattr(sys, "argv", ["pytest"])
+    monkeypatch.delitem(sys.modules, "solution.stream_server", raising=False)
+    assert D._warm_on_import() is False
+
+    monkeypatch.setattr(sys, "argv", ["/x/y/stream_server.py"])
+    assert D._warm_on_import() is True
+
+
+def test_warm_on_import_can_be_forced_either_way(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["pytest"])
+    monkeypatch.setenv("DHWANI_WARM_ON_IMPORT", "1")
+    assert D._warm_on_import() is True
+    monkeypatch.setenv("DHWANI_WARM_ON_IMPORT", "0")
+    assert D._warm_on_import() is False
+
+
+def test_default_chunk_window_does_not_split_dictation_length_clips(monkeypatch):
+    """Guards a measured tradeoff that is easy to "optimise" back the wrong way.
+
+    Shrinking the window to 6s makes it fire on ordinary ~10s clips and is a
+    real latency win (20.51 -> 28.20 of 30 on the streaming harness). It is also
+    a real quality loss once the committer genuinely locks a window: -6.90/70
+    over six clips, worst case a Hinglish clip 62.1 -> 35.0 WITH a new fact
+    flip. A flip is a hard 50-cap, so the trade is negative on variance even
+    where it looks flat on the mean. Keep the window longer than the clips."""
+    monkeypatch.delenv("DHWANI_CHUNK_S", raising=False)
+    typical_clip_s = 10.0
+    assert D._chunk_s() + D.CHUNK_SETTLE_S > typical_clip_s, (
+        "the default window now splits an ordinary dictation clip; that was "
+        "measured at -6.90/70 and is not a free latency win")
+
+
+# --- mix-first: skip the primary decode on code-switched Indic audio ---------
+
+def make_two_model_fake(record: list):
+    """Fake where the MIX model returns Latin-rich Hinglish and the default
+    model returns pure Devanagari — the real measured shape of these clips."""
+    # Real mix-model output on code-switched audio is Latin AND Devanagari, and
+    # both halves are load-bearing here: _latin_tokens strips digits (so
+    # "latin0".."latin5" would collapse to ONE token and never clear the
+    # threshold), and the Devanagari guard rejects Latin-only output as a
+    # mis-detected English clip.
+    latin = ("hello", "world", "this", "application", "is", "running", "ठीक", "है")
+
+    def fake(window, lang, prompt, final=False, model=None, fast=False):
+        record.append({"model": model, "lang": lang, "final": final})
+        if model:      # the mix model
+            words = [(f" {w}", float(i), float(i) + 0.5) for i, w in enumerate(latin)]
+        else:
+            words = [(" नमस्ते", 0.0, 0.5), (" दुनिया", 0.5, 1.0)]
+        return words, "hi"
+    return fake
+
+
+def test_mix_first_skips_the_primary_on_code_switched_audio(monkeypatch):
+    """The measured win: on Hinglish the mix model's answer is what _pick_mixed
+    returns anyway, so paying for the primary first is pure latency."""
+    record: list = []
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "mixy-hinglish")
+    monkeypatch.setenv("DHWANI_MIX_BACKEND", "native")
+    monkeypatch.setattr(D, "_transcribe", make_two_model_fake(record))
+    D.draft_reset()
+    monkeypatch.setattr(D, "_lang", "hi")      # the hint the partials provide
+
+    text, lang = D._decode_final_segment(speech(3.0), pinned_lang=None)
+
+    assert lang == "hi"
+    assert "hello" in text, f"did not return the mix model's transcript: {text!r}"
+    assert len(record) == 1, f"expected ONE decode, got {len(record)}: {record}"
+    assert record[0]["model"] == "mixy-hinglish"
+
+
+def test_mix_first_still_runs_both_on_pure_hindi_and_never_decodes_mix_twice(monkeypatch):
+    """Pure Hindi genuinely needs the primary (-5.8/70 without it). The mix
+    candidate from the first pass must be REUSED, not decoded again."""
+    record: list = []
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "mixy-hinglish")
+    monkeypatch.setenv("DHWANI_MIX_BACKEND", "native")
+
+    def all_devanagari(window, lang, prompt, final=False, model=None, fast=False):
+        record.append({"model": model})
+        return [(" नमस्ते", 0.0, 0.5), (" दुनिया", 0.5, 1.0)], "hi"
+
+    monkeypatch.setattr(D, "_transcribe", all_devanagari)
+    D.draft_reset()
+    monkeypatch.setattr(D, "_lang", "hi")
+
+    D._decode_final_segment(speech(3.0), pinned_lang=None)
+
+    mix_calls = [r for r in record if r["model"] == "mixy-hinglish"]
+    assert len(mix_calls) == 1, f"mix model decoded {len(mix_calls)} times: {record}"
+    assert any(r["model"] is None for r in record), "primary never ran on pure Hindi"
+
+
+def test_mix_first_does_not_fire_without_a_language_hint(monkeypatch):
+    """No hint means no reason to believe the clip is Indic, so the ordinary
+    detect-then-escalate path must run unchanged."""
+    record: list = []
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "mixy-hinglish")
+    monkeypatch.setenv("DHWANI_MIX_BACKEND", "native")
+    monkeypatch.setattr(D, "_transcribe", make_two_model_fake(record))
+    D.draft_reset()
+    monkeypatch.setattr(D, "_lang", None)
+
+    D._decode_final_segment(speech(3.0), pinned_lang=None)
+    assert record and record[0]["model"] is None, (
+        f"mix ran before the primary with no hint: {record}")
+
+
+def test_mix_first_leaves_english_alone(monkeypatch):
+    """An English hint must never reach the mix model."""
+    record: list = []
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "mixy-hinglish")
+    monkeypatch.setenv("DHWANI_MIX_BACKEND", "native")
+    monkeypatch.setattr(D, "_transcribe", make_fake(record, raw_lang="en"))
+    D.draft_reset()
+    monkeypatch.setattr(D, "_lang", "en")
+
+    D._decode_final_segment(speech(3.0), pinned_lang=None)
+    assert all(r["model"] is None for r in record), f"English escalated: {record}"
+
+
+def test_mix_first_refuses_to_skip_the_primary_on_latin_only_output(monkeypatch):
+    """The guard that makes a bad language hint harmless again. The hint comes
+    from the cheap draft model and can call an English clip Hindi; zero-stt on
+    English returns plenty of Latin and would clear the token threshold on its
+    own. Genuine code-switch is Latin AND Devanagari."""
+    record: list = []
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "mixy-hinglish")
+    monkeypatch.setenv("DHWANI_MIX_BACKEND", "native")
+
+    latin_only = ("the", "quick", "brown", "fox", "jumps", "over")
+
+    def fake(window, lang, prompt, final=False, model=None, fast=False):
+        record.append({"model": model})
+        return [(f" {w}", float(i), float(i) + 0.5)
+                for i, w in enumerate(latin_only)], "hi"
+
+    monkeypatch.setattr(D, "_transcribe", fake)
+    D.draft_reset()
+    monkeypatch.setattr(D, "_lang", "hi")       # the bad hint
+
+    D._decode_final_segment(speech(3.0), pinned_lang=None)
+    assert any(r["model"] is None for r in record), (
+        f"skipped the primary on Latin-only output: {record}")
+
+
+def test_mix_first_skips_the_primary_when_the_budget_is_spent(monkeypatch):
+    """Reordering must not make a tight deadline worse. Once the mix decode has
+    eaten the budget, the (unconditional) primary below would land the final
+    late; on pure Hindi the primary is worth ~5.8/70, a late final far less.
+
+    The budget here allows the FIRST decode and not the second, which is the
+    only window in which this guard is the thing being tested."""
+    record: list = []
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "mixy-hinglish")
+    monkeypatch.setenv("DHWANI_MIX_BACKEND", "native")
+
+    def slow_devanagari(window, lang, prompt, final=False, model=None, fast=False):
+        record.append({"model": model})
+        time.sleep(0.5)          # spends most of the budget below
+        return [(" नमस्ते", 0.0, 0.5),
+                (" दुनिया", 0.5, 1.0)], "hi"
+
+    monkeypatch.setattr(D, "_transcribe", slow_devanagari)
+    D.draft_reset()
+    monkeypatch.setattr(D, "_lang", "hi")
+
+    # MIX_MIN_S room at the start, less than that left once the mix pass returns
+    deadline = time.monotonic() + D.MIX_MIN_S + 0.2
+    text, lang = D._decode_final_segment(speech(3.0), pinned_lang=None, deadline=deadline)
+
+    assert text.strip(), "returned nothing rather than the mix candidate"
+    assert record and record[0]["model"] == "mixy-hinglish", (
+        f"mix-first did not run first: {record}")
+    assert all(r["model"] == "mixy-hinglish" for r in record), (
+        f"ran the primary with no budget left: {record}")
+
+
+def test_indic_hint_reads_devanagari_when_the_language_field_is_empty(monkeypatch):
+    """The partial worker yields to the committer and the speculator, so on a
+    slow machine it may never complete and `_lang` stays None -- measured: None
+    on all three local Hinglish clips. Devanagari already on the page is
+    evidence in its own right."""
+    D.draft_reset()
+    monkeypatch.setattr(D, "_lang", None)
+    assert D._indic_hint(None) is False, "claimed Indic with no evidence at all"
+
+    with D._state_lock:
+        D._tail = "नमस्ते दुनिया"
+    try:
+        assert D._indic_hint(None) is True
+    finally:
+        D.draft_reset()
+
+
+def test_indic_hint_trusts_an_explicit_english_language_over_stray_devanagari(monkeypatch):
+    """A populated language field is stronger evidence than loose script."""
+    D.draft_reset()
+    monkeypatch.setattr(D, "_lang", "en")
+    with D._state_lock:
+        D._tail = "नमस्ते"
+    try:
+        assert D._indic_hint(None) is False
+        assert D._indic_hint("en") is False
+        assert D._indic_hint("hi") is True
+    finally:
+        D.draft_reset()
+
+
+def test_primary_is_skipped_when_it_cannot_fit_in_what_the_mix_pass_left(monkeypatch):
+    """Self-calibrating budget: the decode that just ran estimates the next one.
+    A slow host drops the primary (-5.8/70 on pure Hindi) and buys back more
+    than that on the latency axis; a fast host keeps both."""
+    record: list = []
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "mixy-hinglish")
+    monkeypatch.setenv("DHWANI_MIX_BACKEND", "native")
+
+    def slow_devanagari(window, lang, prompt, final=False, model=None, fast=False):
+        record.append({"model": model})
+        time.sleep(1.2)
+        return [(" नमस्ते", 0.0, 0.5), (" दुनिया", 0.5, 1.0)], "hi"
+
+    monkeypatch.setattr(D, "_transcribe", slow_devanagari)
+    D.draft_reset()
+    monkeypatch.setattr(D, "_lang", "hi")
+
+    # Budget admits the first 1.2s decode but not a second one of the same cost.
+    text, _ = D._decode_final_segment(speech(3.0), pinned_lang=None,
+                                      deadline=time.monotonic() + 2.0)
+    assert text.strip()
+    assert all(r["model"] == "mixy-hinglish" for r in record), (
+        f"ran a primary that could not fit: {record}")
+
+
+def test_primary_still_runs_on_pure_hindi_when_there_is_plenty_of_budget(monkeypatch):
+    """The other half: a fast host must keep the primary, which is what makes
+    pure Hindi score 57.78 rather than 54.14."""
+    record: list = []
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "mixy-hinglish")
+    monkeypatch.setenv("DHWANI_MIX_BACKEND", "native")
+
+    def quick_devanagari(window, lang, prompt, final=False, model=None, fast=False):
+        record.append({"model": model})
+        return [(" नमस्ते", 0.0, 0.5), (" दुनिया", 0.5, 1.0)], "hi"
+
+    monkeypatch.setattr(D, "_transcribe", quick_devanagari)
+    D.draft_reset()
+    monkeypatch.setattr(D, "_lang", "hi")
+
+    D._decode_final_segment(speech(3.0), pinned_lang=None,
+                            deadline=time.monotonic() + 30.0)
+    assert any(r["model"] is None for r in record), (
+        f"dropped the primary despite ample budget: {record}")

@@ -1,0 +1,82 @@
+{
+ "quality": 48.730000000000004,
+ "latency": 26.636000000000003,
+ "total": 75.36600000000001,
+ "clips": [
+  {
+   "clip_id": "fleurs_en_us_test_1674",
+   "category": "fleurs_english",
+   "quality": 35.0,
+   "latency": 24.21,
+   "total": 59.21,
+   "ms": 1965,
+   "path": "",
+   "meaning": 0.812,
+   "flip": true,
+   "audio_s": 6.6,
+   "pred": "In some areas boiling water for a minute. is enough and other serval minutes are needed.",
+   "covered": 0.43,
+   "spec_covered": 0.0
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1728",
+   "category": "fleurs_english",
+   "quality": 35.0,
+   "latency": 25.07,
+   "total": 60.07,
+   "ms": 1821,
+   "path": "",
+   "meaning": 0.733,
+   "flip": true,
+   "audio_s": 6.7,
+   "pred": "The cabbage juice changes colors depending on house acidic or basic acolyd that chemical is.",
+   "covered": 0.42,
+   "spec_covered": 0.0
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1802",
+   "category": "fleurs_english",
+   "quality": 70.0,
+   "latency": 24.11,
+   "total": 94.11,
+   "ms": 1982,
+   "path": "",
+   "meaning": 1.0,
+   "flip": false,
+   "audio_s": 5.8,
+   "pred": "The Internet combines elements of both mass and interpersonal communication.",
+   "covered": 0.0,
+   "spec_covered": 0.0
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1904",
+   "category": "fleurs_english",
+   "quality": 68.65,
+   "latency": 29.79,
+   "total": 98.44,
+   "ms": 1034,
+   "path": "",
+   "meaning": 0.973,
+   "flip": false,
+   "audio_s": 10.6,
+   "pred": "However, due to the slow communication channels, styles in the west could lag behind by 25 30 year.",
+   "covered": 0.37,
+   "spec_covered": 0.38
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1952",
+   "category": "fleurs_english",
+   "quality": 35.0,
+   "latency": 30.0,
+   "total": 65.0,
+   "ms": 892,
+   "path": "",
+   "meaning": 0.756,
+   "flip": true,
+   "audio_s": 11.3,
+   "pred": "Anyone who is going to drive at high latitude. Or over malign passes, she considered the possibility of snow, ice. Or freezing temperatures.",
+   "covered": 0.77,
+   "spec_covered": 0.35
+  }
+ ]
+}

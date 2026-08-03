@@ -1,0 +1,82 @@
+{
+ "quality": 48.730000000000004,
+ "latency": 25.074,
+ "total": 73.804,
+ "clips": [
+  {
+   "clip_id": "fleurs_en_us_test_1674",
+   "category": "fleurs_english",
+   "quality": 35.0,
+   "latency": 29.87,
+   "total": 64.87,
+   "ms": 1022,
+   "path": "tail-decode",
+   "meaning": 0.812,
+   "flip": true,
+   "audio_s": 6.6,
+   "pred": "In some areas boiling water for a minute. is enough and other serval minutes are needed.",
+   "covered": 0.43,
+   "spec_covered": 0.0
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1728",
+   "category": "fleurs_english",
+   "quality": 35.0,
+   "latency": 29.89,
+   "total": 64.89,
+   "ms": 1019,
+   "path": "tail-decode",
+   "meaning": 0.733,
+   "flip": true,
+   "audio_s": 6.7,
+   "pred": "The cabbage juice changes colors depending on house acidic or basic acolyd that chemical is.",
+   "covered": 0.42,
+   "spec_covered": 0.0
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1802",
+   "category": "fleurs_english",
+   "quality": 70.0,
+   "latency": 22.79,
+   "total": 92.79,
+   "ms": 2151,
+   "path": "speculation",
+   "meaning": 1.0,
+   "flip": false,
+   "audio_s": 5.8,
+   "pred": "The Internet combines elements of both mass and interpersonal communication.",
+   "covered": 0.0,
+   "spec_covered": 0.0
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1904",
+   "category": "fleurs_english",
+   "quality": 68.65,
+   "latency": 24.36,
+   "total": 93.01,
+   "ms": 1940,
+   "path": "tail-decode",
+   "meaning": 0.973,
+   "flip": false,
+   "audio_s": 10.6,
+   "pred": "However, due to the slow communication channels, styles in the west could lag behind by 25 30 year.",
+   "covered": 0.37,
+   "spec_covered": 0.38
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1952",
+   "category": "fleurs_english",
+   "quality": 35.0,
+   "latency": 18.46,
+   "total": 53.46,
+   "ms": 2692,
+   "path": "tail-decode",
+   "meaning": 0.884,
+   "flip": true,
+   "audio_s": 11.3,
+   "pred": "Anyone who's going to drive at high latitude or overmountain passes should consider the possibility of snow, ice or freezing temperatures.",
+   "covered": 0.52,
+   "spec_covered": 0.35
+  }
+ ]
+}

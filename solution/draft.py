@@ -54,13 +54,19 @@ Environment:
     DHWANI_CHUNK_S       seconds; windows are committed during the clip (at
                          phrase boundaries, or at this hard bound if the speaker
                          never pauses) so the end-of-clip decode only processes
-                         the uncommitted tail, not the whole buffer
-                         (default: 12; 0 restores the pure whole-buffer final)
+                         the uncommitted tail, not the whole buffer (default: 12
+                         — 6 is faster but measured -6.90/70 once windows
+                         actually close, see _chunk_s. 0 restores whole-buffer)
     DHWANI_FINAL_BUDGET_S  wall-clock the final call may spend before returning
                          the best text already in hand (default: 3.0 — 2000ms
                          still pays 24/30 latency points and the hard caps only
                          bite past 4000ms, so this buys room for the mix decode,
                          which is worth far more than the points it costs)
+    DHWANI_WARM_ON_IMPORT  unset (default) auto-detects and warms only inside the
+                         sealed stream_server process, on a background thread.
+                         The server prints READY before any model is loaded, so
+                         without this the load lands on the FIRST scored clip.
+                         1 forces it on, 0 off (the test suite and tooling).
     DHWANI_DEVICE        cpu | cuda | auto (ctranslate2 only)
     DHWANI_ORTHOGRAPHY   0 to disable the corpus adapter   (default: ON — the
                          must_have terms are Latin substrings, so Devanagari
@@ -118,6 +124,11 @@ _spec_thread: threading.Thread | None = None
 _spec_started = 0        # len(audio) when the in-flight speculation began
 _spec_text: str | None = None
 _spec_covered = 0        # len(audio) a COMPLETED speculation decoded
+
+# Which branch _finalize took, for the local harness only. The scored path never
+# reads it; it exists because quality alone cannot tell a real decode apart from
+# the best-effort fallback, and those two differ by ~9 points on the same audio.
+_LAST_FINAL_PATH = ""
 
 # committed-window final state (see the "chunked final" section). On long clips
 # closed windows are decoded during the clip and their text locked here, so the
@@ -254,33 +265,45 @@ def _finalize(audio: bytes) -> tuple[str, int]:
     Quality is only sacrificed in (3), and only on clips where a decode could
     not finish in time — where the alternative was a late final worth nothing.
     """
+    global _LAST_FINAL_PATH
     import time as _time
     deadline = _time.monotonic() + _final_budget_s()
 
+    # Joins the in-flight speculation for the WHOLE remaining budget, leaving
+    # the tail decode nothing if that wait fails. Holding back a reserve for the
+    # tail decode looks obviously safer and was measured WORSE: 75.37 -> 65.09
+    # on the streaming harness at the scoring host's decode rate, with one clip
+    # going 94.1 -> 50.9 because it abandoned a speculation that would have
+    # landed. The speculation is a whole-buffer decode at full quality; the tail
+    # decode replacing it is degraded AND contends with the abandoned
+    # speculation, which keeps running. Waiting is the better bet.
     text = _spec_take(audio, deadline)
     if text is not None and text.strip():
+        _LAST_FINAL_PATH = "speculation"
         return (text, len(text))
 
     worker, box = _start_final_decode(audio, deadline)
     worker.join(timeout=max(0.0, deadline - _time.monotonic()))
     text = box.get("text", "")
     if text.strip():
+        _LAST_FINAL_PATH = "tail-decode"
         return (text, len(text))
 
     fallback = _best_effort_text()
     if fallback.strip():
+        _LAST_FINAL_PATH = "best-effort"
         return (fallback, len(fallback))
 
     # Nothing in hand at all. Returning now would be a BLANK final, which the
     # scorecard scores 0 for the clip — strictly worse than a late one, which
     # still scores its quality (capped 70 past 4s, 50 past 6s). So keep waiting.
     worker.join(timeout=HARD_WAIT_S)
+    _LAST_FINAL_PATH = "overrun-wait"
     text = box.get("text", "") or _best_effort_text()
     return (text, len(text))
 
 
 MIX_MIN_S = 1.0     # don't start the mix decode with less than this left
-
 
 def _time_for_mix(deadline: float | None) -> bool:
     """Whether there is room for the mix model's extra decode. No deadline
@@ -325,12 +348,36 @@ def _best_effort_text() -> str:
     with _state_lock:
         committed_windows = _fc_text.strip()
         live = (_committed + _tail).strip()
-    if committed_windows and live:
-        return _normalize_numbers(_deloop(_pick_better(committed_windows, live)))
-    return _normalize_numbers(_deloop(committed_windows or live))
+        spec, spec_bytes, fc_bytes = (_spec_text or "").strip(), _spec_covered, _fc_bytes
+    # A speculation that covered only a PREFIX is unusable as the scored final
+    # (_spec_take rejects it), but here the alternative is a blank final, and a
+    # blank scores 0 — the hardest cap on the card. It is a whole-buffer decode
+    # with full context, so where it reaches further into the clip than the
+    # committed windows do, it is also the best text we hold.
+    best = spec if (spec and spec_bytes > fc_bytes) else committed_windows
+    if best and live:
+        return _normalize_numbers(_deloop(_pick_better(best, live)))
+    return _normalize_numbers(_deloop(best or live))
 
 
 def _chunk_s() -> float:
+    """Seconds of audio a window may hold before the committer closes it.
+
+    Stays at 12, and the reason is measured. Dropping it to 6 makes windows
+    close on ordinary 10s clips and is a large LATENCY win — on the real
+    streaming path, 20.51 -> 28.20 of 30 with the median end-to-final at 1024ms
+    instead of 1560ms. It is also a real QUALITY loss, which only shows up once
+    the committer actually locks something: -6.90/70 mean over six clips, worst
+    case a Hinglish clip at 62.1 -> 35.0 with a NEW fact flip, because joined
+    segments lose cross-boundary context and _fc_lang pins the language from the
+    first closed window, which is wrong on code-switched speech.
+
+    Net that is a wash on points and strictly worse on variance, since a fact
+    flip is a hard 50-cap. So 12 stays: on dictation-length clips it commits
+    nothing and the final is a clean whole-buffer decode, while long clips still
+    get their tail bounded. The latency has to come from somewhere that does not
+    cut the audio into pieces.
+    """
     try:
         return float(os.environ.get("DHWANI_CHUNK_S", "12") or 0)
     except ValueError:
@@ -384,6 +431,65 @@ def _final_decode(audio: bytes, prompt: str = "", fast: bool = False,
     return _normalize_numbers(seg_text)
 
 
+# Distinct Latin words in the mix model's output that justify SKIPPING the
+# primary decode entirely. Deliberately stricter than _mix_latin_min(), which
+# only has to arbitrate between two transcripts we already hold: skipping is the
+# risky action, so it demands more evidence. Measured on the local corpus, this
+# separates cleanly with margin — the three Hinglish clips produced 6, 8 and 6
+# Latin tokens, the five pure-Hindi clips 0, 3, 3, 1 and 1.
+MIX_FIRST_LATIN_MIN = 5
+
+# Devanagari is the OTHER half of the code-switch test, and it is a safety guard
+# rather than a quality one. The hint that triggers mix-first comes from the
+# cheap draft model, which can mis-detect an English clip as Hindi; today that
+# is harmless (the primary still auto-detects), but skipping the primary on a
+# bad hint would not be — zero-stt on English audio returns plenty of Latin and
+# would sail past the token threshold. Genuine code-switched speech is Latin AND
+# Devanagari; English is Latin only. All eight local Indic clips carry
+# Devanagari, so this costs nothing on the audio it is meant to serve.
+_DEVANAGARI = re.compile(r"[ऀ-ॿ]")
+
+
+def _indic_hint(pinned_lang: str | None) -> bool:
+    """Do we already have evidence this clip is Indic, without paying for it?
+
+    Three sources, cheapest-first, and all of them are work already done:
+    a committed window pinned the language using the FINAL model (most
+    reliable), the streaming partials detected one on the draft model, or —
+    when neither field got populated — the text produced so far is visibly
+    Devanagari, which is evidence in itself.
+
+    The third source exists because the first two can both be empty: the partial
+    worker yields to the committer and the speculator, so on a machine where
+    decodes run long relative to the clip it may never complete, and `_lang`
+    stays None. Measured here: on all three local Hinglish clips `_lang` was
+    still None at the end of the clip. No hint simply means the ordinary
+    detect-then-escalate path runs, so this is never worse — but each extra
+    source is another clip that gets the cheaper route.
+
+    NB deliberately does NOT call _detect_language(): on the mlx backend that
+    runs a full mlx_whisper.transcribe(), i.e. an entire decode, which would
+    cost more than the decode it is trying to save.
+    """
+    if pinned_lang:
+        return pinned_lang in _INDIC
+    if _lang:
+        return _lang in _INDIC
+    with _state_lock:
+        so_far = _fc_text + _committed + _tail
+    return bool(_DEVANAGARI.search(so_far))
+
+
+def _mix_decode(audio: bytes, prompt: str = "", fast: bool = False) -> str:
+    """One decode on DHWANI_MIX_MODEL, through whichever backend it needs."""
+    if _mix_backend() == "transformers":
+        words, _ = _transcribe_mix_transformers(audio)
+    else:
+        words, _ = _transcribe(audio, "hi", prompt=prompt, final=True, fast=fast,
+                               model=_mix_model())
+    return _deloop(_text_from(words, "hi"))
+
+
 def _decode_final_segment(audio: bytes, pinned_lang: str | None,
                           prompt: str = "", fast: bool = False,
                           deadline: float | None = None) -> tuple[str, str | None]:
@@ -422,6 +528,54 @@ def _decode_final_segment(audio: bytes, pinned_lang: str | None,
     # the streaming partials did on the cheap draft model. Costs nothing here.
     hint = pinned_lang or _lang
     primary_model = _en_model() if (hint == "en" and _en_model()) else None
+    mix = _mix_model()
+    gate = os.environ.get("DHWANI_MIX_GATE", "indic")
+
+    # MIX-FIRST. When the hint already says Indic we know the mix pass is coming,
+    # and on code-switched audio its answer wins outright — measured on the three
+    # local Hinglish clips, mix-only scored IDENTICALLY to the pair-and-pick
+    # (63.2/58.9/54.2 both ways) for 62.6% less decode time. So run it first and,
+    # when its output is plainly code-switched, return without ever paying for
+    # the primary. That halves the final's cost on exactly the clips whose two
+    # sequential decodes make Hindi/Hinglish the slowest finals we produce.
+    #
+    # Pure Hindi is NOT skipped: there the primary does earn its keep (mix-only
+    # measured -5.8/70 mean, worst clip -13.6), so those clips still run both —
+    # only in the other order, at the same cost, reusing this candidate below.
+    mix_first: str | None = None
+    mix_first_cost = 0.0
+    if (mix and _indic_hint(pinned_lang) and gate != "codeswitch"
+            and _time_for_mix(deadline)):
+        import time as _time
+        _t0 = _time.monotonic()
+        try:
+            mix_first = _mix_decode(audio, prompt=prompt, fast=fast)
+        except Exception as exc:
+            _log_error(f"finalize/mix-first (model={mix!r})", exc)
+        mix_first_cost = _time.monotonic() - _t0
+        if (mix_first and not _looks_bad(mix_first)
+                and len(_latin_tokens(mix_first)) >= MIX_FIRST_LATIN_MIN
+                and _DEVANAGARI.search(mix_first)):
+            return mix_first, "hi"
+        # Not code-switched, so the primary IS worth running on this audio —
+        # measured at ~5.8/70 on pure Hindi. But only if it fits.
+        #
+        # The decode that just ran is a free estimator of what the next one
+        # costs: same audio, comparable model. So run the primary only when at
+        # least that much budget remains. This is what makes the trade
+        # self-calibrating rather than a guess about hardware nobody here can
+        # measure — on a fast host both decodes fit and quality wins; on a slow
+        # one the primary is dropped, which costs 5.8 of the 70-point quality
+        # axis and buys far more than that back on the 30-point latency axis,
+        # where halving a 3.5s final is worth about 13 points.
+        #
+        # Without this, reordering would make a tight budget strictly WORSE than
+        # before: the mix decode is now the one that has already run, and the
+        # primary below is unconditional.
+        if mix_first and deadline is not None:
+            left = deadline - _time.monotonic()
+            if left < max(mix_first_cost, MIX_MIN_S):
+                return mix_first, "hi"
 
     try:
         words, raw = _transcribe(audio, lang0, prompt=prompt, final=True, fast=fast,
@@ -443,7 +597,6 @@ def _decode_final_segment(audio: bytes, pinned_lang: str | None,
     # and pure-Hindi rows in the local manifests don't carry them.
     detected = pinned_lang or ("hi" if raw in _INDIC else raw)
     is_indic = (pinned_lang in _INDIC) if pinned_lang else (raw in _INDIC)
-    mix = _mix_model()
     bad = (
         not text
         or (is_indic and detected != "hi")
@@ -456,19 +609,20 @@ def _decode_final_segment(audio: bytes, pinned_lang: str | None,
     # model that (like Apex) collapses on pure-Devanagari audio. NB the
     # codeswitch signal is weak: whisper often writes Hinglish clips entirely
     # in Devanagari, so true code-switch clips can look Latin-free here.
-    gate = os.environ.get("DHWANI_MIX_GATE", "indic")
     want_mix = (mix is not None and is_indic
                 and (bad or gate != "codeswitch" or _has_latin(text))
                 and _time_for_mix(deadline))
     if bad or want_mix:
         try:
-            if want_mix and _mix_backend() == "transformers":
-                words_hi, _ = _transcribe_mix_transformers(audio)
+            if mix_first is not None and want_mix:
+                candidate = mix_first     # already decoded above; never pay twice
+            elif want_mix and _mix_backend() == "transformers":
+                candidate = _deloop(_text_from(_transcribe_mix_transformers(audio)[0], "hi"))
             else:
                 kw = {"model": mix} if (want_mix and mix) else {}
                 words_hi, _ = _transcribe(audio, "hi", prompt=prompt, final=True,
                                           fast=fast, **kw)
-            candidate = _deloop(_text_from(words_hi, "hi"))
+                candidate = _deloop(_text_from(words_hi, "hi"))
             # Mix models can verbalize digits ("334" -> "3.3 0.4", measured on
             # Apex): if the healthy primary heard a multi-digit number the
             # candidate lost, the facts axis (20 pts, hard 50-cap) outweighs
@@ -730,6 +884,30 @@ def _get_mix_transformers(repo: str):
     return _mix_state
 
 
+def _mix_beam() -> int:
+    """Beam width for the mix model. GREEDY by default, and unlike the primary
+    that is the measured answer, not an oversight.
+
+    Beam is nearly free on the primary (encoder-dominated: 22.25s vs 24.12s) and
+    bought +4.97/70 on English. On this model, through transformers, it is not
+    free and it does not pay:
+
+        Hinglish   58.78/70 @ 52.2s greedy  ->  59.34/70 @ 139.5s at beam 5
+        pure Hindi 51.36/70            ->  53.37/70
+
+    The Hinglish clips are the ones whose final IS this model's output, and
+    there beam buys +0.56 for 2.7x the decode — on exactly the clips whose
+    latency mix-first just halved. The +2.02 on pure Hindi is unreachable:
+    _pick_mixed can never return the mix candidate there (it needs
+    _mix_latin_min() Latin words and pure-Hindi output carries 0-3), so that
+    gain would be computed and thrown away.
+    """
+    try:
+        return max(1, int(os.environ.get("DHWANI_MIX_BEAM", "1")))
+    except ValueError:
+        return 1
+
+
 def _transcribe_mix_transformers(window: bytes):
     """Whole-buffer decode on the mix model. Returns the same (words, lang)
     shape as the other backends: one pseudo-word spanning the clip — the final
@@ -754,8 +932,18 @@ def _transcribe_mix_transformers(window: bytes):
             continue
         inputs = proc(piece, sampling_rate=SR, return_tensors="pt")
         feats = inputs["input_features"].to(device=device, dtype=model.dtype)
+        # Beam width matters MORE here than on the primary. This model's output
+        # is not a candidate any more — since mix-first it IS the final on every
+        # code-switched clip — and it had been decoding greedily while the
+        # primary got beam 5 (worth +4.97/70 on the English set). Whisper decode
+        # cost is dominated by the fixed encoder pass, so a wider beam is close
+        # to free: measured 22.25s vs 24.12s greedy on the primary.
+        beams = _mix_beam()
+        kwargs = {"task": "transcribe"}
+        if beams > 1:
+            kwargs["num_beams"] = beams
         with torch.inference_mode():
-            ids = model.generate(feats, task="transcribe")
+            ids = model.generate(feats, **kwargs)
         texts.append(proc.batch_decode(ids, skip_special_tokens=True)[0].strip())
     text = " ".join(t for t in texts if t).strip()
     dur = len(window) / BYTES_PER_SEC
@@ -1633,3 +1821,39 @@ def _looks_bad(text: str) -> bool:
     if _ARABIC.search(text):
         return True
     return False
+
+
+# --- cold start -----------------------------------------------------------
+#
+# The sealed stream_server prints `READY port=...` as soon as the socket is
+# listening; it never calls warm_models(). So the model load lands lazily on
+# the FIRST draft() call, i.e. inside the first scored clip. Measured on the
+# local streaming harness: clip 1 took 23016 ms end-to-final and returned the
+# best-effort text, while later clips on the same run finished in 731-1355 ms.
+#
+# Warming runs on a BACKGROUND thread, deliberately. Doing it inline would move
+# the load in front of `READY`, and evaluator.py terminates a server that has
+# not printed READY within 60 seconds — turning a slow first clip into a failed
+# run. This way READY is immediate and the load overlaps the harness's own
+# setup. Guarded so the test suite and the offline tooling, which import this
+# module constantly, never trigger a model download.
+
+def _warm_on_import() -> bool:
+    """Unset — the scored default — means auto-detect: warm only inside the
+    sealed server process. "1" forces it on so the local streaming harness can
+    reproduce the server's cold start; "0" forces it off for the test suite."""
+    forced = os.environ.get("DHWANI_WARM_ON_IMPORT")
+    if forced is not None:
+        return forced != "0"
+    import sys
+    if "solution.stream_server" in sys.modules:
+        return True
+    return os.path.basename(sys.argv[0] or "") == "stream_server.py"
+
+
+if _warm_on_import():
+    try:
+        threading.Thread(target=warm_models, daemon=True,
+                         name="dhwani-warm").start()
+    except Exception as exc:      # never let warming stop the server starting
+        _log_error("warm-on-import (models will load on the first clip)", exc)

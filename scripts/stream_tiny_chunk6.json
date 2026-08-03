@@ -1,0 +1,82 @@
+{
+ "quality": 53.184000000000005,
+ "latency": 28.2,
+ "total": 81.384,
+ "clips": [
+  {
+   "clip_id": "fleurs_en_us_test_1674",
+   "category": "fleurs_english",
+   "quality": 61.18,
+   "latency": 29.85,
+   "total": 91.03,
+   "ms": 1024,
+   "path": "tail-decode",
+   "meaning": 0.824,
+   "flip": false,
+   "audio_s": 6.6,
+   "pred": "In some areas boiling water for a minute. And it is enough and other several minutes are needed.",
+   "covered": 0.43,
+   "spec_covered": 0.0
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1728",
+   "category": "fleurs_english",
+   "quality": 35.0,
+   "latency": 30.0,
+   "total": 65.0,
+   "ms": 933,
+   "path": "tail-decode",
+   "meaning": 0.8,
+   "flip": true,
+   "audio_s": 6.7,
+   "pred": "The cabbage juice changes colors depending on house. The acidic or basic acolyte chemical is.",
+   "covered": 0.42,
+   "spec_covered": 0.0
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1802",
+   "category": "fleurs_english",
+   "quality": 70.0,
+   "latency": 28.17,
+   "total": 98.17,
+   "ms": 1305,
+   "path": "speculation",
+   "meaning": 1.0,
+   "flip": false,
+   "audio_s": 5.8,
+   "pred": "The Internet combines elements of both mass and interpersonal communication.",
+   "covered": 0.0,
+   "spec_covered": 0.0
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1904",
+   "category": "fleurs_english",
+   "quality": 64.74,
+   "latency": 22.98,
+   "total": 87.72,
+   "ms": 2128,
+   "path": "speculation",
+   "meaning": 0.895,
+   "flip": false,
+   "audio_s": 10.6,
+   "pred": "However, due to the slow communication channels Stows in the west could lag behind by 25 to 30 years.",
+   "covered": 0.77,
+   "spec_covered": 0.61
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1952",
+   "category": "fleurs_english",
+   "quality": 35.0,
+   "latency": 30.0,
+   "total": 65.0,
+   "ms": 665,
+   "path": "tail-decode",
+   "meaning": 0.933,
+   "flip": true,
+   "audio_s": 11.3,
+   "pred": "Anyone who is going to drive at high latitudes? Or over mountain passes, should consider the possibility of snow, ice? Or freezing temperatures?",
+   "covered": 0.77,
+   "spec_covered": 0.35
+  }
+ ]
+}

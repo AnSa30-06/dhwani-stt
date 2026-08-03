@@ -1,0 +1,46 @@
+{
+ "quality": 0.0,
+ "latency": 0.0,
+ "total": 0.0,
+ "clips": [
+  {
+   "clip_id": "fleurs_en_us_test_1674",
+   "category": "fleurs_english",
+   "quality": 0.0,
+   "latency": 0.0,
+   "total": 0.0,
+   "ms": 23024,
+   "path": "overrun-wait",
+   "meaning": 0.0,
+   "flip": true,
+   "audio_s": 6.6,
+   "pred": ""
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1728",
+   "category": "fleurs_english",
+   "quality": 0.0,
+   "latency": 0.0,
+   "total": 0.0,
+   "ms": 23006,
+   "path": "overrun-wait",
+   "meaning": 0.0,
+   "flip": true,
+   "audio_s": 6.7,
+   "pred": ""
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1802",
+   "category": "fleurs_english",
+   "quality": 0.0,
+   "latency": 0.0,
+   "total": 0.0,
+   "ms": 23031,
+   "path": "overrun-wait",
+   "meaning": 0.0,
+   "flip": true,
+   "audio_s": 5.8,
+   "pred": ""
+  }
+ ]
+}

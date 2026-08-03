@@ -1,0 +1,114 @@
+{
+ "whole": [
+  {
+   "clip_id": "fleurs_en_us_test_1674",
+   "category": "fleurs_english",
+   "points": 63.75,
+   "meaning": 0.875,
+   "flip": false,
+   "pred": "In some areas boiling water for a minute is enough and other several minutes are needed.",
+   "covered": 0.0
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1728",
+   "category": "fleurs_english",
+   "points": 35.0,
+   "meaning": 0.867,
+   "flip": true,
+   "pred": "The cabbage juice changes colors depending on how acidic or basic acolyte the chemical is.",
+   "covered": 0.0
+  },
+  {
+   "clip_id": "fleurs_hi_in_test_1666",
+   "category": "fleurs_hindi",
+   "points": 58.89,
+   "meaning": 0.778,
+   "flip": false,
+   "pred": "अपनी सरकार के अलावा आप अन्य देशों की सरकारों की सला ले सकते हैं हाला कि उनकी सला उनके नागरिकों को ध्यान में रख कर दी जाती है",
+   "covered": 0.0
+  },
+  {
+   "clip_id": "fleurs_hi_in_test_1718",
+   "category": "fleurs_hindi",
+   "points": 57.93,
+   "meaning": 0.759,
+   "flip": false,
+   "pred": "ऐसी कोई वैश्विक परिभाशा नहीं है जिसके लिए निर्मित समान इंटीक होते हैं। कुछ कर एजंसिया 100 साल से पुराने समान को इंटीक के तौर पर परभाशित करती हैं।",
+   "covered": 0.0
+  },
+  {
+   "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0000",
+   "category": "openslr104_hinglish",
+   "points": 62.11,
+   "meaning": 0.842,
+   "flip": false,
+   "pred": "लिबर आफिस impress में एक प्रस्तुति document बनाना और बुन्यादी formatting के इस spoken tutorial में आपका स्वागत रहाए।",
+   "covered": 0.0
+  },
+  {
+   "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0001",
+   "category": "openslr104_hinglish",
+   "points": 62.59,
+   "meaning": 0.852,
+   "flip": false,
+   "pred": "इस tutorial में हम impress window के भागों के बारे में सीखेंगे और कैसे स्लाइड इंसर्ट करें और कॉपी करें फॉर्ट तथा फॉर्ट को फॉर्मैट करना सीखेंगे",
+   "covered": 0.0
+  }
+ ],
+ "chunk6": [
+  {
+   "clip_id": "fleurs_en_us_test_1674",
+   "category": "fleurs_english",
+   "points": 61.18,
+   "meaning": 0.824,
+   "flip": false,
+   "pred": "In some areas, boiling water for a minute. One minute is enough and other several minutes are needed.",
+   "covered": 0.43
+  },
+  {
+   "clip_id": "fleurs_en_us_test_1728",
+   "category": "fleurs_english",
+   "points": 32.5,
+   "meaning": 0.65,
+   "flip": true,
+   "pred": "The cabbage juice changes colors depending on how it is. This is the most acidic or basic acolyte that chemical is. The cabbage juice changes.",
+   "covered": 0.82
+  },
+  {
+   "clip_id": "fleurs_hi_in_test_1666",
+   "category": "fleurs_hindi",
+   "points": 58.89,
+   "meaning": 0.778,
+   "flip": false,
+   "pred": "अपनी सरकार के अलावा आप अन्य देशों की सरकारों की सला ले सकते हैं। हाला की उनकी सला उनके नागरिकों को ध्यान में रख कर दी जाती है।",
+   "covered": 0.49
+  },
+  {
+   "clip_id": "fleurs_hi_in_test_1718",
+   "category": "fleurs_hindi",
+   "points": 54.92,
+   "meaning": 0.698,
+   "flip": false,
+   "pred": "ऐसी कोई वैश्विक परिभाशा नहीं है जिसके लिए निर्मित समान परिभाशा नहीं है। इंटीक होते हैं। कुछ कर एजन्सिया 100 साल से पुराने समान को इंटीक के तौर पर परभाशित करती हैं। झाल झा",
+   "covered": 0.93
+  },
+  {
+   "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0000",
+   "category": "openslr104_hinglish",
+   "points": 35.0,
+   "meaning": 0.737,
+   "flip": true,
+   "pred": "लिबर ओफिस impress में एक प्रस्तुति डॉक्यमेंट बनाना और बुन्यादी formatting के इस spoken टिटोर्यल में आपका स्वागत देखे",
+   "covered": 0.35
+  },
+  {
+   "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0001",
+   "category": "openslr104_hinglish",
+   "points": 56.36,
+   "meaning": 0.727,
+   "flip": false,
+   "pred": "है इस tutorial में हम impress window के भागों के बारे में सीखेंगे और कैसे slide insert करें और copy करें font तदा font को format करना सीखेंगे",
+   "covered": 0.75
+  }
+ ]
+}
