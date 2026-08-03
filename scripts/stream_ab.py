@@ -83,8 +83,12 @@ def stream_final(D, pcm, step_s=1.0):
     step = int(step_s * D.BYTES_PER_SEC)
     for end in range(step, len(pcm) + 1, step):
         D.draft(pcm[:end], False)
-    # let any in-flight / pending window close before finalizing
-    deadline = time.monotonic() + 30
+    # Let any in-flight / pending window close before finalizing. This wait must
+    # outlast a REAL window decode: at 30s it expired mid-commit on this CPU box,
+    # the committer locked nothing, and the chunked arm quietly ran the control's
+    # whole-buffer path -- which is why an earlier run printed identical scores
+    # on both arms. Generous by design; this is an offline quality run.
+    deadline = time.monotonic() + float(os.environ.get("DHWANI_AB_DRAIN_S", "300"))
     last, stable = -1, 0
     while time.monotonic() < deadline:
         D.draft(pcm, False)
@@ -97,13 +101,26 @@ def stream_final(D, pcm, step_s=1.0):
         else:
             stable, last = 0, fb
         time.sleep(0.05)
+    with D._state_lock:
+        committed = D._fc_bytes
     text, _ = D.draft(pcm, True)
-    return text
+    # How much of the clip the committer had locked before the final ran. If
+    # this is 0 on the chunked arm then chunking never engaged and an identical
+    # score on both arms means "the same code path ran twice", not "chunking is
+    # free". Both arms printing the same number is otherwise indistinguishable.
+    return text, committed / max(1, len(pcm))
 
 
 def run(clips, window):
     os.environ["DHWANI_MIX_MODEL"] = ""      # isolate chunking: turbo on both sides
     os.environ["DHWANI_SPECULATE"] = "0"
+    # This is a QUALITY A/B, so the final must be allowed to finish. Without
+    # this the shipped 3s budget expires long before a real decode returns on a
+    # CPU box, every final falls through blank, and the run prints a clean
+    # 0.00-vs-0.00 "no difference" -- which reads as "chunking is neutral" and
+    # is actually "nothing was measured". That is how this A/B silently
+    # produced nothing the first time it was attempted.
+    os.environ.setdefault("DHWANI_FINAL_BUDGET_S", "600")
     import importlib
     import solution.draft as D
     importlib.reload(D)
@@ -114,12 +131,23 @@ def run(clips, window):
         print(f"\n=== {label} (DHWANI_CHUNK_S={chunk}) ===", flush=True)
         rows = []
         for c in clips:
-            pred = stream_final(D, c["pcm"])
+            pred, covered = stream_final(D, c["pcm"])
             pts, meaning, flip = quality_points(c, pred)
             rows.append({"clip_id": c["clip_id"], "category": c["category"],
-                         "points": pts, "meaning": meaning, "flip": flip, "pred": pred})
+                         "points": pts, "meaning": meaning, "flip": flip,
+                         "pred": pred, "covered": round(covered, 2)})
             print(f"  {c['clip_id'][:34]:34s} {pts:5.1f}/70  m{meaning:.2f}"
-                  f"{'  FLIP' if flip else ''}", flush=True)
+                  f"  committed {covered:4.0%}{'  FLIP' if flip else ''}", flush=True)
+        if chunk != "0" and not any(r["covered"] for r in rows):
+            raise SystemExit(
+                f"[{label}] the committer never locked a single window, so this "
+                f"arm ran the SAME whole-buffer path as the control. An equal "
+                f"score here would mean nothing was compared.")
+        if not any(r["pred"].strip() for r in rows):
+            raise SystemExit(
+                f"[{label}] every final came back blank -- the decoder never "
+                f"produced anything, so this run measured NOTHING. Do not read "
+                f"the 0.00 as a result. Check DHWANI_FINAL_BUDGET_S and HF_HOME.")
         results[label] = rows
     return results
 
@@ -127,8 +155,19 @@ def run(clips, window):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--window", type=int, default=8, help="forced chunk seconds for the B run")
+    ap.add_argument("--per-category", type=int, default=0,
+                    help="cap clips per category; this box needs ~1 min per clip per side")
     args = ap.parse_args()
     clips = load_clips()
+    if args.per_category:
+        seen: dict[str, int] = {}
+        kept = []
+        for c in clips:
+            n = seen.get(c["category"], 0)
+            if n < args.per_category:
+                seen[c["category"]] = n + 1
+                kept.append(c)
+        clips = kept
     print(f"{len(clips)} clips; forcing chunk window = {args.window}s so short clips split")
     results = run(clips, args.window)
 
