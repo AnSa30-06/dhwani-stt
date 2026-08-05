@@ -141,6 +141,23 @@ def convert(repo_or_path: str, out_dir: str, dtype: str = "float16") -> Path:
     from safetensors.numpy import save_file
     save_file(mlx, str(out / "weights.safetensors"))
     (out / "config.json").write_text(json.dumps(dims, indent=1), encoding="utf-8")
+
+    # The weights are only half the model. The first conversion shipped without
+    # this and DEGRADED: the fine-tune's generation_config carries a suppress
+    # list transformers applies on every generate() and mlx_whisper knows
+    # nothing about — decoded without it the model rambled ("... तो तो ..."),
+    # slower and worse at once. Store the recipe next to the weights so the
+    # decode path can hand it to mlx's DecodingOptions.suppress_tokens.
+    recipe: dict = {}
+    for src in (snap / "generation_config.json", snap / "config.json"):
+        if not src.exists():
+            continue
+        g = json.loads(src.read_text(encoding="utf-8"))
+        tokens = g.get("suppress_tokens")
+        if tokens and not recipe.get("suppress_tokens"):
+            recipe["suppress_tokens"] = sorted({int(t) for t in tokens if int(t) >= 0})
+    if recipe:
+        (out / "recipe.json").write_text(json.dumps(recipe, indent=1), encoding="utf-8")
     return out
 
 

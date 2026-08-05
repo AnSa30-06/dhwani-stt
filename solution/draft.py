@@ -85,17 +85,18 @@ Environment:
                          worth +5.8/70 on pure Hindi and costs a whole decode;
                          priced on real hardware that trade is negative. 0
                          restores the pair
-    DHWANI_MIX_MLX       0 (default) — the mix model stays on transformers.
-                         MEASURED OFF on real Apple silicon: the converted
-                         weights are correct (encoder sinusoids intact, all 946
-                         tensors mapped) but the fine-tune's decoding recipe
-                         lives in generation_config.json — 88 suppress_tokens,
-                         begin_suppress, forced_decoder_ids — and mlx_whisper
-                         ignores all of it, so the model RAMBLES: same Hindi
-                         clip 2230ms/57.7q via transformers vs 4835ms/55.7q via
-                         the conversion. Slower AND worse. 1 re-enables the
-                         experiment; the warm-time verify then requires a clean
-                         non-looping decode of a real Hindi clip before use
+    DHWANI_MIX_MLX       0 (default) — the mix model stays on transformers,
+                         pending on-machine proof. The first conversion carried
+                         the weights and not the fine-tune's decoding recipe
+                         (generation_config's 88 suppress_tokens, applied
+                         silently by transformers, ignored by mlx_whisper), and
+                         the model RAMBLED: 2230ms/57.7q -> 4835ms/55.7q on the
+                         same clip. The converter now stores the recipe next to
+                         the weights and the decode passes it through
+                         DecodingOptions.suppress_tokens — but that fix has not
+                         yet run on Apple silicon, and this default only flips
+                         on data. 1 opts in; the warm-time verify then demands a
+                         clean non-looping decode of a real Hindi clip first
     DHWANI_WARM_ON_IMPORT  unset (default) auto-detects and warms only inside the
                          sealed stream_server process, on a background thread.
                          The server prints READY before any model is loaded, so
@@ -1227,13 +1228,13 @@ def _mix_mlx_dir(convert: bool = False) -> str | None:
     DHWANI_MIX_MLX_PATH points at a pre-converted directory and skips all of it.
     DHWANI_MIX_MLX=0 disables the whole thing.
     """
-    # Default OFF, measured. The conversion itself is byte-correct — what it
-    # cannot carry is the DECODING recipe: this fine-tune's generation_config
-    # holds 88 suppress_tokens plus begin_suppress and forced_decoder_ids, all
-    # applied silently by transformers and all ignored by mlx_whisper. Decoded
-    # without them the model repeats itself ("... तो तो ..."), which is slower
-    # (more tokens) and worse at once: 2230ms/57.7q -> 4835ms/55.7q on the same
-    # clip, same machine. A weight converter cannot fix a sampler mismatch.
+    # Default OFF until the recipe-carrying conversion proves itself on Apple
+    # silicon. The first version converted weights alone and the model rambled
+    # (2230ms/57.7q -> 4835ms/55.7q: generation_config's suppress list is half
+    # the model and mlx_whisper never reads it). The converter now writes
+    # recipe.json and _transcribe_mlx passes it — but "should work now" is what
+    # shipped the ramble, so the default moves only when _verify_mix_mlx has
+    # blessed a real decode on the machine that will run it.
     if not _env_flag("DHWANI_MIX_MLX", False):
         return None
     explicit = os.environ.get("DHWANI_MIX_MLX_PATH")
@@ -1423,8 +1424,12 @@ _MLX_REPOS = {
 
 def _mlx_repo(name: str) -> str:
     """Map a whisper size to a real mlx-community repo id. A full repo id
-    (contains "/") passes through untouched, so DHWANI_MODEL can name any repo."""
-    if "/" in name:
+    (contains "/") or a LOCAL DIRECTORY passes through untouched, so
+    DHWANI_MODEL can name any repo and the converted mix model can be a path.
+    The isdir check exists because a Windows-style path has no "/" and was
+    getting rewritten into a nonsense repo id — caught by a test, on the one
+    platform where the converted dir spells its path with backslashes."""
+    if "/" in name or os.path.isdir(name):
         return name
     if name in _MLX_REPOS:
         return _MLX_REPOS[name]
@@ -1791,6 +1796,35 @@ _MLX_LEVEL: dict[str, int] = {}
 _MLX_LEVEL_LOCK = threading.Lock()
 
 
+_MLX_RECIPE_CACHE: dict[str, list | None] = {}
+
+
+def _mlx_recipe(repo: str) -> list | None:
+    """The fine-tune's suppress list, stored by the converter as recipe.json.
+
+    Only local converted directories carry one; hub repo ids return None and
+    decode exactly as before. Passed to mlx as [-1, *tokens]: the -1 keeps
+    OpenAI's standard non-speech suppression and the rest re-applies what
+    transformers was applying silently — a superset of both runtimes' defaults,
+    so it can only constrain the decode, never loosen it.
+    """
+    if repo in _MLX_RECIPE_CACHE:
+        return _MLX_RECIPE_CACHE[repo]
+    tokens: list | None = None
+    try:
+        path = os.path.join(repo, "recipe.json")
+        if os.path.isdir(repo) and os.path.exists(path):
+            import json
+            with open(path, encoding="utf-8") as fh:
+                raw = json.load(fh).get("suppress_tokens") or []
+            tokens = [int(t) for t in raw] or None
+    except Exception as exc:      # noqa: BLE001 — a bad recipe must not kill decodes
+        _log_note(f"unreadable recipe.json in {repo} ({exc}) — decoding without it")
+        tokens = None
+    _MLX_RECIPE_CACHE[repo] = tokens
+    return tokens
+
+
 def _mlx_kwarg_levels(repo: str, lang: str | None, prompt: str, final: bool,
                       beam: int) -> list[dict]:
     """Progressively smaller argument sets for mlx_whisper.transcribe().
@@ -1817,6 +1851,13 @@ def _mlx_kwarg_levels(repo: str, lang: str | None, prompt: str, final: bool,
                     logprob_threshold=-1.0, no_speech_threshold=0.6)
     else:
         full.update(temperature=0.0)
+    recipe = _mlx_recipe(repo)
+    if recipe:
+        # Kept through the same rungs as the thresholds and dropped with them:
+        # a runtime that rejects the kwarg costs one call, and losing the
+        # recipe on a deep rung is survivable because the warm-time verify has
+        # already proven this model decodes cleanly on THIS runtime.
+        full["suppress_tokens"] = [-1, *recipe]
 
     with_beam = dict(full, beam_size=beam) if beam > 1 else dict(full)
     no_thresholds = {k: v for k, v in full.items()

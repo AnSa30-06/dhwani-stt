@@ -11,6 +11,12 @@ Then send back the `dhwani-results-<date>-<your mac>.zip` it prints at the end.
 
 That is genuinely all. Everything else below is only if something looks wrong.
 
+This round's headline question: a config row named `mix_mlx_on` re-tests a
+speed-up that failed its first outing, now with the fix. The run decides on its
+own whether the fix worked — a line saying either "verified on a real clip" or
+"REJECTED the conversion" appears in the log — so there is nothing you need to
+judge; just send the results back.
+
 Two things worth knowing:
 
 - **The first two minutes already produce the most important answer.** Watch for

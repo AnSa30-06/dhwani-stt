@@ -226,3 +226,147 @@ def test_mix_mlx_verify_blesses_a_clean_decode(monkeypatch, tmp_path):
                         lambda *a, **k: ([(" नमस्ते दुनिया यह ठीक है", 0.0, 1.0)], "hi"))
     assert D._verify_mix_mlx(str(tmp_path)) == str(tmp_path)
     assert (tmp_path / "VERIFIED").exists()
+
+
+# --- the recipe travels with the weights ------------------------------------
+
+def test_converter_stores_the_suppress_recipe(tmp_path):
+    """The first conversion carried weights alone and the model rambled. The
+    generation_config's suppress list is half the model."""
+    import json
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "config.json").write_text(json.dumps({
+        "model_type": "whisper", "num_mel_bins": 80, "max_source_positions": 4,
+        "d_model": 8, "encoder_attention_heads": 2, "encoder_layers": 1,
+        "vocab_size": 16, "max_target_positions": 6, "decoder_layers": 1,
+        "decoder_attention_heads": 2}), encoding="utf-8")
+    (snap / "generation_config.json").write_text(
+        json.dumps({"suppress_tokens": [5, 3, 3, 9]}), encoding="utf-8")
+
+    import numpy as np
+    from safetensors.numpy import save_file
+    d, mlp = 8, 32
+    lin = lambda o=d, i=d: np.zeros((o, i), dtype=np.float32)  # noqa: E731
+    vec = lambda n=d: np.zeros((n,), dtype=np.float32)         # noqa: E731
+    state = {
+        "model.encoder.conv1.weight": np.zeros((d, 80, 3), dtype=np.float32),
+        "model.encoder.conv1.bias": vec(),
+        "model.encoder.conv2.weight": np.zeros((d, d, 3), dtype=np.float32),
+        "model.encoder.conv2.bias": vec(),
+        "model.encoder.layer_norm.weight": vec(),
+        "model.encoder.layer_norm.bias": vec(),
+        "model.encoder.embed_positions.weight": np.zeros((4, d), dtype=np.float32),
+        "model.decoder.embed_tokens.weight": np.zeros((16, d), dtype=np.float32),
+        "model.decoder.embed_positions.weight": np.zeros((6, d), dtype=np.float32),
+        "model.decoder.layer_norm.weight": vec(),
+        "model.decoder.layer_norm.bias": vec(),
+    }
+    for side, cross in (("encoder", False), ("decoder", True)):
+        base = f"model.{side}.layers.0"
+        state.update({
+            f"{base}.self_attn.q_proj.weight": lin(), f"{base}.self_attn.q_proj.bias": vec(),
+            f"{base}.self_attn.k_proj.weight": lin(),
+            f"{base}.self_attn.v_proj.weight": lin(), f"{base}.self_attn.v_proj.bias": vec(),
+            f"{base}.self_attn.out_proj.weight": lin(), f"{base}.self_attn.out_proj.bias": vec(),
+            f"{base}.self_attn_layer_norm.weight": vec(), f"{base}.self_attn_layer_norm.bias": vec(),
+            f"{base}.fc1.weight": lin(mlp, d), f"{base}.fc1.bias": vec(mlp),
+            f"{base}.fc2.weight": lin(d, mlp), f"{base}.fc2.bias": vec(),
+            f"{base}.final_layer_norm.weight": vec(), f"{base}.final_layer_norm.bias": vec(),
+        })
+        if cross:
+            state.update({
+                f"{base}.encoder_attn.q_proj.weight": lin(), f"{base}.encoder_attn.q_proj.bias": vec(),
+                f"{base}.encoder_attn.k_proj.weight": lin(),
+                f"{base}.encoder_attn.v_proj.weight": lin(), f"{base}.encoder_attn.v_proj.bias": vec(),
+                f"{base}.encoder_attn.out_proj.weight": lin(), f"{base}.encoder_attn.out_proj.bias": vec(),
+                f"{base}.encoder_attn_layer_norm.weight": vec(), f"{base}.encoder_attn_layer_norm.bias": vec(),
+            })
+    save_file(state, str(snap / "model.safetensors"))
+
+    from solution import hf_to_mlx as H
+    out = H.convert(str(snap), str(tmp_path / "out"))
+    recipe = json.loads((out / "recipe.json").read_text(encoding="utf-8"))
+    assert recipe["suppress_tokens"] == [3, 5, 9], "recipe not stored deduped+sorted"
+    conv1 = None
+    from safetensors import safe_open
+    with safe_open(str(out / "weights.safetensors"), framework="numpy") as f:
+        conv1 = f.get_tensor("encoder.conv1.weight")
+    assert conv1.shape == (8, 3, 80), f"conv not transposed to (out,k,in): {conv1.shape}"
+
+
+def test_mlx_decode_passes_the_recipe_for_converted_models(monkeypatch, tmp_path):
+    import json
+    import sys
+    import types
+    (tmp_path / "recipe.json").write_text(json.dumps({"suppress_tokens": [5, 9]}),
+                                          encoding="utf-8")
+    calls: list = []
+
+    def transcribe(pcm, **kw):
+        calls.append(kw)
+        return {"language": "hi", "text": " ठीक",
+                "segments": [{"text": " ठीक", "words": [{"word": " ठीक", "start": 0.0, "end": 0.4}]}]}
+
+    module = types.ModuleType("mlx_whisper")
+    module.transcribe = transcribe            # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx_whisper", module)
+    monkeypatch.setattr(D, "_backend", "mlx")
+    D._MLX_LEVEL.clear()
+    D._MLX_RECIPE_CACHE.clear()
+
+    D._transcribe_mlx(speech(1.0), lang="hi", prompt="", model_name=str(tmp_path),
+                      final=True)
+    assert calls and calls[0].get("suppress_tokens") == [-1, 5, 9], (
+        f"the recipe did not reach the decode: {calls[0].keys()}")
+    D._backend = None
+
+
+def test_mlx_decode_survives_a_runtime_that_rejects_the_recipe(monkeypatch, tmp_path):
+    """Ladder insurance: suppress_tokens refused -> one lost call, not a blank."""
+    import json
+    import sys
+    import types
+    (tmp_path / "recipe.json").write_text(json.dumps({"suppress_tokens": [5]}),
+                                          encoding="utf-8")
+
+    def transcribe(pcm, **kw):
+        if "suppress_tokens" in kw:
+            raise TypeError("unexpected keyword argument 'suppress_tokens'")
+        return {"language": "hi", "text": " ठीक",
+                "segments": [{"text": " ठीक", "words": [{"word": " ठीक", "start": 0.0, "end": 0.4}]}]}
+
+    module = types.ModuleType("mlx_whisper")
+    module.transcribe = transcribe            # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx_whisper", module)
+    monkeypatch.setattr(D, "_backend", "mlx")
+    D._MLX_LEVEL.clear()
+    D._MLX_RECIPE_CACHE.clear()
+
+    words, lang = D._transcribe_mlx(speech(1.0), lang="hi", prompt="",
+                                    model_name=str(tmp_path), final=True)
+    assert D._text_from(words, lang).strip(), "a rejected recipe blanked the decode"
+    D._backend = None
+
+
+def test_hub_repo_ids_decode_without_any_recipe(monkeypatch):
+    import sys
+    import types
+    calls: list = []
+
+    def transcribe(pcm, **kw):
+        calls.append(kw)
+        return {"language": "en", "text": " ok",
+                "segments": [{"text": " ok", "words": [{"word": " ok", "start": 0.0, "end": 0.4}]}]}
+
+    module = types.ModuleType("mlx_whisper")
+    module.transcribe = transcribe            # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx_whisper", module)
+    monkeypatch.setattr(D, "_backend", "mlx")
+    D._MLX_LEVEL.clear()
+    D._MLX_RECIPE_CACHE.clear()
+
+    D._transcribe_mlx(speech(1.0), lang="en", prompt="", model_name="tiny", final=True)
+    assert calls and "suppress_tokens" not in calls[0], (
+        "a hub model picked up a recipe it does not have")
+    D._backend = None
