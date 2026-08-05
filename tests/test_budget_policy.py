@@ -185,7 +185,44 @@ def test_mix_decode_uses_the_converted_model_when_present(monkeypatch):
     assert seen == ["/tmp/converted"], f"did not use the converted model: {seen}"
 
 
-def test_mix_mlx_can_be_switched_off(monkeypatch):
-    monkeypatch.setenv("DHWANI_MIX_MLX", "0")
+def test_mix_mlx_is_OFF_by_default(monkeypatch):
+    """Measured on real Apple silicon: the converted weights decode without the
+    fine-tune's suppress-token recipe and ramble — 2230ms/57.7q became
+    4835ms/55.7q on the same clip. Off unless someone opts in AND the real-clip
+    verify blesses it."""
+    monkeypatch.delenv("DHWANI_MIX_MLX", raising=False)
     monkeypatch.setenv("DHWANI_MIX_MODEL", "someone/mix-model")
     assert D._mix_mlx_dir(convert=True) is None
+
+
+def test_mix_mlx_verify_fails_closed_without_a_reference_clip(monkeypatch, tmp_path):
+    """No proof, no marker: the fallback it would displace is known-good, so an
+    unprovable optimisation must stay off rather than ship on faith — the
+    first verify shipped on faith and blessed a degraded model."""
+    monkeypatch.setattr(D.os.path, "exists",
+                        lambda p: False if p.endswith(".wav") else os.path.exists(p))
+    assert D._verify_mix_mlx(str(tmp_path)) is None
+    assert not (tmp_path / "VERIFIED").exists()
+
+
+def test_mix_mlx_verify_rejects_a_rambling_decode(monkeypatch, tmp_path):
+    """The exact observed failure: Devanagari present, but looping."""
+    wav = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "data", "dev", "audio", "fleurs_hi_in_test_1666.wav")
+    if not os.path.exists(wav):
+        pytest.skip("reference clip not present")
+    monkeypatch.setattr(D, "_transcribe_mlx",
+                        lambda *a, **k: ([(" नमस्ते तो तो तो तो तो तो तो तो", 0.0, 1.0)], "hi"))
+    assert D._verify_mix_mlx(str(tmp_path)) is None
+    assert not (tmp_path / "VERIFIED").exists()
+
+
+def test_mix_mlx_verify_blesses_a_clean_decode(monkeypatch, tmp_path):
+    wav = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "data", "dev", "audio", "fleurs_hi_in_test_1666.wav")
+    if not os.path.exists(wav):
+        pytest.skip("reference clip not present")
+    monkeypatch.setattr(D, "_transcribe_mlx",
+                        lambda *a, **k: ([(" नमस्ते दुनिया यह ठीक है", 0.0, 1.0)], "hi"))
+    assert D._verify_mix_mlx(str(tmp_path)) == str(tmp_path)
+    assert (tmp_path / "VERIFIED").exists()

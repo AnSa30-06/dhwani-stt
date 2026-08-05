@@ -159,13 +159,16 @@ MODELS = [
         {"DHWANI_EN_MODEL": "large-v3"}),
     cfg("mix_off", "what the second model is worth once its time is counted",
         {"DHWANI_MIX_MODEL": ""}),
-    # The mix decode is the whole end-to-final on every Indic clip, and it was
-    # running on the slowest runtime available: transformers/MPS at 2.16s
-    # against mlx's 1.08s for the same size class. Converting it is now the
-    # default; this row forces the old path back to price the change.
-    cfg("mix_transformers", "the OLD mix runtime — measures what converting the "
-        "mix model to MLX actually bought",
-        {"DHWANI_MIX_BACKEND": "transformers"}),
+    # The MLX conversion of the mix model is byte-correct and still DECODES
+    # WORSE: the fine-tune's generation_config carries 88 suppress_tokens plus
+    # begin_suppress and forced_decoder_ids, transformers applies them silently,
+    # mlx_whisper ignores them, and the model rambles — 2230ms/57.7q became
+    # 4835ms/55.7q on the same clip. Off by default since; this row re-runs the
+    # experiment behind the real-clip verify, which is expected to REJECT it.
+    # A rejection here is the verify working, not the row failing.
+    cfg("mix_mlx_on", "opt the mix model into MLX under the strict verify — "
+        "expected to be rejected; measures the verify as much as the conversion",
+        {"DHWANI_MIX_MLX": "1"}),
     cfg("mix_only_off", "run the primary on pure Hindi again. Worth +5.8/70 of "
         "quality and a whole extra decode; the default now says that trade is "
         "negative once the clock is counted", {"DHWANI_MIX_ONLY": "0"}),
@@ -219,7 +222,7 @@ def quick_subset():
     """~45 minutes instead of ~3 hours: the baseline calibration plus the rows
     most likely to move the number. Used when QUICK=1."""
     keep = {"baseline_evaluator", "baseline_stream_slice", "budget_3.0", "chunk_0",
-            "partials_off", "spec_join_periodic_4", "mix_transformers", "mix_only_off",
+            "partials_off", "spec_join_periodic_4", "mix_mlx_on", "mix_only_off",
             "model_medium", "en_model_large_v3", "temps_short"}
     out = [c for c in ALL if c["id"] in keep]
     for c in out:

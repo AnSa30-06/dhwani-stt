@@ -240,12 +240,13 @@ def stage_blank_gate() -> bool:
         f"(rungs used: {res.get('mlx_rungs') or 'rung 0, nothing refused'})")
     mix_mlx = res.get("mix_mlx")
     if mix_mlx:
-        say(f"   ** MIX MODEL IS ON MLX ** (converted + decode-verified at {mix_mlx}) "
-            "— the submitted build's biggest unknown is CONFIRMED on this machine")
+        say(f"   mix model is on MLX ({mix_mlx}) — someone opted in with "
+            "DHWANI_MIX_MLX=1 and the real-clip verify blessed it")
     else:
-        say("   mix model is on transformers (conversion absent or failed its "
-            "decode verify — see the warm log lines above; the engine still "
-            "works, Indic finals just run ~1s slower)")
+        say("   mix model is on transformers — the correct default. The MLX "
+            "conversion was measured WORSE on real hardware (the fine-tune's "
+            "suppress-token recipe doesn't survive conversion and the model "
+            "rambles); the mix_mlx_on sweep row re-tests it under the verify")
     return True
 
 

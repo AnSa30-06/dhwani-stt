@@ -85,10 +85,17 @@ Environment:
                          worth +5.8/70 on pure Hindi and costs a whole decode;
                          priced on real hardware that trade is negative. 0
                          restores the pair
-    DHWANI_MIX_MLX       1 (default) converts the mix model to MLX once during
-                         warm-up. 2.16s -> ~1.1s per clip on Apple silicon, and
-                         the mix decode IS the end-to-final on every Indic clip.
-                         DHWANI_MIX_MLX_PATH points at a pre-converted directory
+    DHWANI_MIX_MLX       0 (default) — the mix model stays on transformers.
+                         MEASURED OFF on real Apple silicon: the converted
+                         weights are correct (encoder sinusoids intact, all 946
+                         tensors mapped) but the fine-tune's decoding recipe
+                         lives in generation_config.json — 88 suppress_tokens,
+                         begin_suppress, forced_decoder_ids — and mlx_whisper
+                         ignores all of it, so the model RAMBLES: same Hindi
+                         clip 2230ms/57.7q via transformers vs 4835ms/55.7q via
+                         the conversion. Slower AND worse. 1 re-enables the
+                         experiment; the warm-time verify then requires a clean
+                         non-looping decode of a real Hindi clip before use
     DHWANI_WARM_ON_IMPORT  unset (default) auto-detects and warms only inside the
                          sealed stream_server process, on a background thread.
                          The server prints READY before any model is loaded, so
@@ -1220,7 +1227,14 @@ def _mix_mlx_dir(convert: bool = False) -> str | None:
     DHWANI_MIX_MLX_PATH points at a pre-converted directory and skips all of it.
     DHWANI_MIX_MLX=0 disables the whole thing.
     """
-    if not _env_flag("DHWANI_MIX_MLX", True):
+    # Default OFF, measured. The conversion itself is byte-correct — what it
+    # cannot carry is the DECODING recipe: this fine-tune's generation_config
+    # holds 88 suppress_tokens plus begin_suppress and forced_decoder_ids, all
+    # applied silently by transformers and all ignored by mlx_whisper. Decoded
+    # without them the model repeats itself ("... तो तो ..."), which is slower
+    # (more tokens) and worse at once: 2230ms/57.7q -> 4835ms/55.7q on the same
+    # clip, same machine. A weight converter cannot fix a sampler mismatch.
+    if not _env_flag("DHWANI_MIX_MLX", False):
         return None
     explicit = os.environ.get("DHWANI_MIX_MLX_PATH")
     if explicit:
@@ -1444,14 +1458,7 @@ def warm_models() -> None:
             try:
                 converted = _mix_mlx_dir(convert=True)
                 if converted and not os.path.exists(os.path.join(converted, "VERIFIED")):
-                    # Prove the converted weights DECODE before trusting them
-                    # with a scored clip. Half a second of silence is enough:
-                    # the question is only whether mlx can run the graph.
-                    _transcribe_mlx(b"\x00\x00" * int(0.5 * SR), lang="hi", prompt="",
-                                    model_name=converted, final=False)
-                    with open(os.path.join(converted, "VERIFIED"), "w") as fh:
-                        fh.write("decoded ok\n")
-                    _log_note(f"mix mlx conversion verified at {converted}")
+                    converted = _verify_mix_mlx(converted)
             except Exception as exc:
                 _log_error("warm_models/mix->mlx conversion — using transformers", exc)
                 converted = None
@@ -1474,6 +1481,56 @@ def warm_models() -> None:
         except Exception as exc:
             _log_error(f"warm_models/{name} — continuing anyway", exc)
     _verify_final_path()
+
+
+def _verify_mix_mlx(converted: str) -> str | None:
+    """Bless the converted mix model only if it TRANSCRIBES WELL, on real audio.
+
+    The first version of this verify decoded half a second of silence and
+    checked for an exception. It passed — and the model it blessed was
+    degraded, not broken: correct weights decoded without the fine-tune's
+    suppress-token recipe ramble ("... तो तो ..."), which cost time and quality
+    at once on the scored path. "Runs without raising" is a claim about the
+    graph; the clip is scored on the TEXT.
+
+    So the bar is now a real Hindi clip from the shipped dev set, and three
+    checks that all target the observed failure: the output carries Devanagari,
+    _deloop finds nothing to remove (a rambling decode is exactly what it
+    removes), and the decode lands under a wall-clock bound. No reference clip
+    on this machine means NO marker — an optimisation that cannot prove itself
+    stays off, because the fallback it displaces is known-good.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    wav = os.path.join(root, "data", "dev", "audio", "fleurs_hi_in_test_1666.wav")
+    if not os.path.exists(wav):
+        _log_note("mix mlx verify: no reference clip on this machine — staying on "
+                  "transformers (the conversion is unproven here, not broken)")
+        return None
+    import time as _time
+    import wave as _wave
+    with _wave.open(wav, "rb") as w:
+        pcm = w.readframes(w.getnframes())
+    t0 = _time.monotonic()
+    words, _ = _transcribe_mlx(pcm, lang="hi", prompt="", model_name=converted,
+                               final=False)
+    took = _time.monotonic() - t0
+    text = _text_from(words, "hi").strip()
+    bound = _env_f("DHWANI_MIX_MLX_VERIFY_S", 4.0)
+    problems = []
+    if not _DEVANAGARI.search(text):
+        problems.append("no Devanagari in the transcript")
+    if _deloop(text) != text:
+        problems.append("repetition loop (the measured ramble)")
+    if took > bound:
+        problems.append(f"decode took {took:.1f}s > {bound:.1f}s bound")
+    if problems:
+        _log_note(f"mix mlx verify REJECTED the conversion: {'; '.join(problems)} "
+                  "— staying on transformers")
+        return None
+    with open(os.path.join(converted, "VERIFIED"), "w") as fh:
+        fh.write(f"real-clip decode ok in {took:.1f}s\n")
+    _log_note(f"mix mlx conversion verified on a real clip in {took:.1f}s at {converted}")
+    return converted
 
 
 def _verify_final_path() -> None:
