@@ -7,9 +7,18 @@ cd dhwani-macbench
 bash runall.sh
 ```
 
-Then send back the `dhwani-results-<date>.zip` it prints at the end.
+Then send back the `dhwani-results-<date>-<your mac>.zip` it prints at the end.
 
 That is genuinely all. Everything else below is only if something looks wrong.
+
+Two things worth knowing:
+
+- **The first two minutes already produce the most important answer.** Watch for
+  a line saying either `** MIX MODEL IS ON MLX **` or `mix model is on
+  transformers` — if you only have ten minutes, running until that line appears
+  and sending a screenshot of it is already valuable.
+- If a friend of yours is also running this, no coordination needed — the
+  result zip carries your machine's name, so the files won't collide.
 
 ---
 

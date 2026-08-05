@@ -146,12 +146,24 @@ def stage_probe() -> None:
     if rtf_file.exists():
         return
     rows = []
+    # If the blank gate's warm converted the mix model, measure the converted
+    # copy too — that number IS the payoff of the submitted build's riskiest
+    # change, and only a real Apple machine can produce it.
+    mix_specs = [("--rtf-mix", "shunyalabs/zero-stt-hinglish", None)]
+    try:
+        sys.path.insert(0, str(ROOT))
+        from solution import draft as _D
+        conv = _D._mix_mlx_dir(convert=False)
+        if conv:
+            mix_specs.append(("--rtf", conv, None))
+    except Exception:          # noqa: BLE001 — probe rows are best-effort
+        pass
     # One subprocess per model: loading turbo + large-v3 + medium + a 3GB mix
     # model into one interpreter is how an 8GB Mac gets OOM-killed halfway.
     for spec in [("--rtf", "large-v3-turbo", None), ("--rtf", "medium", None),
                  ("--rtf", "small", None), ("--rtf", "large-v3", None),
                  ("--rtf", "large-v3-turbo", "ctranslate2"),
-                 ("--rtf-mix", "shunyalabs/zero-stt-hinglish", None)]:
+                 *mix_specs]:
         flag, model, backend = spec
         cmd = [sys.executable, "-m", "bench.probe", flag, model]
         if backend:
@@ -226,6 +238,14 @@ def stage_blank_gate() -> bool:
     say(f"   blank-final gate PASSED — {res.get('n')}/{res.get('n')} clips "
         f"returned text on the {res.get('backend')} backend "
         f"(rungs used: {res.get('mlx_rungs') or 'rung 0, nothing refused'})")
+    mix_mlx = res.get("mix_mlx")
+    if mix_mlx:
+        say(f"   ** MIX MODEL IS ON MLX ** (converted + decode-verified at {mix_mlx}) "
+            "— the submitted build's biggest unknown is CONFIRMED on this machine")
+    else:
+        say("   mix model is on transformers (conversion absent or failed its "
+            "decode verify — see the warm log lines above; the engine still "
+            "works, Indic finals just run ~1s slower)")
     return True
 
 

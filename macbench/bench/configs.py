@@ -220,7 +220,7 @@ def quick_subset():
     most likely to move the number. Used when QUICK=1."""
     keep = {"baseline_evaluator", "baseline_stream_slice", "budget_3.0", "chunk_0",
             "partials_off", "spec_join_periodic_4", "mix_transformers", "mix_only_off",
-            "en_model_large_v3", "temps_short"}
+            "model_medium", "en_model_large_v3", "temps_short"}
     out = [c for c in ALL if c["id"] in keep]
     for c in out:
         if c["mode"] == "evaluator":

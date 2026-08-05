@@ -95,6 +95,11 @@ def run_stream(cfg: dict) -> dict:
         "blank": sum(1 for r in rows if not (r.get("pred") or "").strip()),
         "backend": D._resolve_backend(),
         "mlx_rungs": dict(D._MLX_LEVEL),
+        # Whether the Hindi model is running on MLX (the converted dir) or fell
+        # back to transformers. THE open question of the submitted build — the
+        # conversion was verified for layout on Windows but no Apple machine has
+        # decoded through it yet. Worth ~1s per Indic clip on the scoring host.
+        "mix_mlx": D._mix_mlx_dir(convert=False) if D._mix_model() else None,
         "paths": paths, "warm_s": round(warm_s, 1),
         "by_category": _by_category(rows), "clips": rows,
     }

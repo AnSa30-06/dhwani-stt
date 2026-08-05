@@ -113,7 +113,9 @@ step "5/6  writing the report"
 PYTHONPATH="$PWD/macbench" "$PY" -m bench.report || warn "report generation failed; the raw JSON is still there"
 
 step "6/6  packing the results"
-STAMP=$(date +%Y%m%d-%H%M)
+# Several friends may run this on different Macs — the machine name in the
+# filename keeps their result zips from overwriting each other.
+STAMP="$(date +%Y%m%d-%H%M)-$(hostname -s 2>/dev/null || echo mac)"
 OUT="dhwani-results-$STAMP.zip"
 rm -f "$OUT"
 zip -qr "$OUT" "$RESULTS" && echo "    wrote $(pwd)/$OUT"
