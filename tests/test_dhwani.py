@@ -450,10 +450,37 @@ def prime_partials(audio: bytes, timeout_s: float = 3.0) -> str:
     return ""
 
 
-def test_final_never_exceeds_budget_when_text_is_in_hand(monkeypatch):
-    """THE guarantee: with a usable transcript already in hand, the final must
-    return within budget no matter how slow the model is — a late final scores
-    zero on latency and caps the clip."""
+def test_final_returns_within_budget_when_a_COVERING_transcript_is_in_hand(monkeypatch):
+    """The budget still binds — but only when the text it falls back to is a
+    real transcript of the clip. Committed windows are decoded with full
+    context, so covering ones are worth returning on time."""
+    monkeypatch.setenv("DHWANI_LANG", "hi")
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "")
+    monkeypatch.setenv("DHWANI_SPECULATE", "0")
+    monkeypatch.setenv("DHWANI_CHUNK_S", "0")
+    monkeypatch.setenv("DHWANI_FINAL_BUDGET_S", "0.5")
+    monkeypatch.setattr(D, "_transcribe", slow_fake(10.0))
+    D.draft_reset()
+    audio = speech(6.0)
+    with D._state_lock:                     # as if the committer had locked it all
+        D._fc_text, D._fc_bytes = "a committed transcript of the whole clip", len(audio)
+
+    t0 = time.monotonic()
+    text, stable = D.draft(audio, True)
+    dt = time.monotonic() - t0
+
+    assert dt < 2.0, f"final blocked {dt:.1f}s on a 10s decoder — budget not enforced"
+    assert "committed" in text and stable == len(text)
+
+
+def test_final_waits_rather_than_return_a_FRAGMENT(monkeypatch):
+    """The reversal, and it is measured, not reasoned.
+
+    Same clip, same machine, two runs 500ms apart on either side of the old 3.0s
+    budget: the real decode scored 83.2, the rolling-partial fallback scored
+    24.7 (meaning 0.17, plus a fact flip). The scorecard caps a LATE final at 70
+    past 4s and 50 past 6s, so waiting was worth 75.2. Returning a fragment on
+    time is the worst move available, and the budget used to force it."""
     monkeypatch.setenv("DHWANI_LANG", "hi")
     monkeypatch.setenv("DHWANI_MIX_MODEL", "")
     monkeypatch.setenv("DHWANI_SPECULATE", "0")
@@ -462,15 +489,19 @@ def test_final_never_exceeds_budget_when_text_is_in_hand(monkeypatch):
     D.draft_reset()
     audio = speech(6.0)
     assert prime_partials(audio), "partials produced nothing; test cannot run"
+    with D._state_lock:
+        assert D._fc_bytes == 0, "this test needs the fallback to be UNcovered"
 
-    monkeypatch.setenv("DHWANI_FINAL_BUDGET_S", "0.5")
-    monkeypatch.setattr(D, "_transcribe", slow_fake(10.0))
+    monkeypatch.setenv("DHWANI_FINAL_BUDGET_S", "0.3")
+    monkeypatch.setattr(D, "_transcribe", slow_fake(1.2))
     t0 = time.monotonic()
-    text, stable = D.draft(audio, True)
+    text, _ = D.draft(audio, True)
     dt = time.monotonic() - t0
 
-    assert dt < 2.0, f"final blocked {dt:.1f}s on a 10s decoder — budget not enforced"
-    assert text.strip() and stable == len(text)
+    assert dt >= 1.0, (
+        f"returned a rolling-partial fragment after {dt:.1f}s instead of waiting "
+        "1.2s for the real decode — that trade measured 24.7 against 75.2")
+    assert "slow" in text, f"did not return the real decode: {text!r}"
 
 
 def test_waits_past_budget_rather_than_return_a_blank_final(monkeypatch):
@@ -759,11 +790,36 @@ def test_mix_first_skips_the_primary_on_code_switched_audio(monkeypatch):
     assert record[0]["model"] == "mixy-hinglish"
 
 
-def test_mix_first_still_runs_both_on_pure_hindi_and_never_decodes_mix_twice(monkeypatch):
-    """Pure Hindi genuinely needs the primary (-5.8/70 without it). The mix
-    candidate from the first pass must be REUSED, not decoded again."""
+def test_pure_hindi_is_mix_only_by_default(monkeypatch):
+    """The default flipped once the clock could be read. The primary is worth
+    +5.8/70 on pure Hindi and costs a whole extra decode — ~1.4s on an M4 Pro,
+    which moves a 2.1s final to 3.5s and takes latency from 23 points to 12.
+    Paying 11 to buy 5.8 is not a trade worth making."""
     record: list = []
     monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.delenv("DHWANI_MIX_ONLY", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_MODEL", "mixy-hinglish")
+    monkeypatch.setenv("DHWANI_MIX_BACKEND", "native")
+
+    def all_devanagari(window, lang, prompt, final=False, model=None, fast=False):
+        record.append({"model": model})
+        return [(" नमस्ते", 0.0, 0.5), (" दुनिया", 0.5, 1.0)], "hi"
+
+    monkeypatch.setattr(D, "_transcribe", all_devanagari)
+    D.draft_reset()
+    monkeypatch.setattr(D, "_lang", "hi")
+
+    D._decode_final_segment(speech(3.0), pinned_lang=None)
+    assert record == [{"model": "mixy-hinglish"}], (
+        f"pure Hindi paid for a second decode: {record}")
+
+
+def test_mix_only_off_runs_both_on_pure_hindi_and_never_decodes_mix_twice(monkeypatch):
+    """With the knob off, the old pair runs — and the mix candidate from the
+    first pass must be REUSED, not decoded again."""
+    record: list = []
+    monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_ONLY", "0")
     monkeypatch.setenv("DHWANI_MIX_MODEL", "mixy-hinglish")
     monkeypatch.setenv("DHWANI_MIX_BACKEND", "native")
 
@@ -910,6 +966,9 @@ def test_primary_is_skipped_when_it_cannot_fit_in_what_the_mix_pass_left(monkeyp
     monkeypatch.delenv("DHWANI_LANG", raising=False)
     monkeypatch.setenv("DHWANI_MIX_MODEL", "mixy-hinglish")
     monkeypatch.setenv("DHWANI_MIX_BACKEND", "native")
+    # Mix-only would skip the primary for its own reasons; this test is about
+    # the BUDGET guard, so make the primary something the budget has to refuse.
+    monkeypatch.setenv("DHWANI_MIX_ONLY", "0")
 
     def slow_devanagari(window, lang, prompt, final=False, model=None, fast=False):
         record.append({"model": model})
@@ -933,6 +992,7 @@ def test_primary_still_runs_on_pure_hindi_when_there_is_plenty_of_budget(monkeyp
     pure Hindi score 57.78 rather than 54.14."""
     record: list = []
     monkeypatch.delenv("DHWANI_LANG", raising=False)
+    monkeypatch.setenv("DHWANI_MIX_ONLY", "0")
     monkeypatch.setenv("DHWANI_MIX_MODEL", "mixy-hinglish")
     monkeypatch.setenv("DHWANI_MIX_BACKEND", "native")
 

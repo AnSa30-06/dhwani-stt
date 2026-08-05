@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings. This repo is edited on Windows and run on
+# macOS; a CRLF runall.sh fails on the Mac with "bad interpreter: no such file
+# or directory", which reads like a missing shell rather than a line ending.
+*.sh text eol=lf

@@ -36,9 +36,19 @@ Environment:
     DHWANI_BACKEND       auto | mlx | ctranslate2          (default: auto)
     DHWANI_MODEL         model size/repo for the final      (default: large-v3-turbo)
     DHWANI_DRAFT_MODEL   cheaper size/repo for partials     (default: small)
-    DHWANI_BEAM          beam width for the scored final (default: 5; measured
-                         +4.97/70 on the English clips over greedy, one fewer
-                         fact flip). 1 restores greedy.
+    DHWANI_BEAM          beam width for the scored final (default: 1, GREEDY).
+                         Beam 5 measured +4.97/70 on the English clips — on
+                         CTranslate2. Shipped to a scoring host that runs MLX,
+                         it produced a BLANK final on every clip of two rounds.
+                         See _beam_size. Greedy is now the default everywhere.
+    DHWANI_MLX_BEAM      1 to let the MLX path ask for beam search at all
+                         (default: off). Even then it is only the top rung of
+                         the capability ladder, so a runtime that refuses it
+                         loses one call, not the transcript.
+    DHWANI_VERIFY        0 to skip the start-up self-check that runs the real
+                         scored decode once and falls back from MLX to
+                         CTranslate2 if it raises (default: on). This check is
+                         the thing whose absence cost two submissions.
     DHWANI_EN_MODEL      optional stronger checkpoint for ENGLISH finals; they
                          never pay for the mix decode, so they have budget to
                          spare (unset = use DHWANI_MODEL)
@@ -57,11 +67,28 @@ Environment:
                          the uncommitted tail, not the whole buffer (default: 12
                          — 6 is faster but measured -6.90/70 once windows
                          actually close, see _chunk_s. 0 restores whole-buffer)
-    DHWANI_FINAL_BUDGET_S  wall-clock the final call may spend before returning
-                         the best text already in hand (default: 3.0 — 2000ms
-                         still pays 24/30 latency points and the hard caps only
-                         bite past 4000ms, so this buys room for the mix decode,
-                         which is worth far more than the points it costs)
+    DHWANI_FINAL_BUDGET_S  wall-clock the final may spend before falling back to
+                         text already in hand (default: 5.4 — RAISED from 3.0
+                         after measurement. The scorecard caps a late clip at 70
+                         past 4s and 50 past 6s, while the fallback measured
+                         24.7 against the real decode's 83.2 on the same clip.
+                         See _final_budget_s for the full arithmetic)
+    DHWANI_BE_MIN_COVER  fraction of the clip a real decode must already cover
+                         before the fallback text is trusted (default: 0.6).
+                         Below it the only text is the rolling partials, which
+                         is what scored 0.17 meaning with a fact flip
+    DHWANI_HARD_STOP_S   absolute ceiling on one final call (default: 18.0). The
+                         harness DROPS a clip that has not answered in 20s and
+                         scores it zero, which is worse than any late transcript
+    DHWANI_MIX_ONLY      1 (default) returns the mix model's transcript on Indic
+                         clips without also running the primary. The primary is
+                         worth +5.8/70 on pure Hindi and costs a whole decode;
+                         priced on real hardware that trade is negative. 0
+                         restores the pair
+    DHWANI_MIX_MLX       1 (default) converts the mix model to MLX once during
+                         warm-up. 2.16s -> ~1.1s per clip on Apple silicon, and
+                         the mix decode IS the end-to-final on every Indic clip.
+                         DHWANI_MIX_MLX_PATH points at a pre-converted directory
     DHWANI_WARM_ON_IMPORT  unset (default) auto-detects and warms only inside the
                          sealed stream_server process, on a background thread.
                          The server prints READY before any model is loaded, so
@@ -71,6 +98,34 @@ Environment:
     DHWANI_ORTHOGRAPHY   0 to disable the corpus adapter   (default: ON — the
                          must_have terms are Latin substrings, so Devanagari
                          renderings of them forfeit the 20-point facts axis)
+
+Experiment knobs — every one of these DEFAULTS TO TODAY'S BEHAVIOUR, so an unset
+environment runs the shipped engine unchanged. They exist because none of them
+could be decided on the box this was written on, which decodes 10-20x slower
+than the scoring host and therefore cannot read the 30-point latency axis at
+all. macbench/ sweeps them on Apple hardware; whatever wins there gets promoted
+to a default in code, with its number in the comment, the same as every other
+constant here.
+
+    DHWANI_SPEC_JOIN     1 = when speech overtook a speculation, decode only the
+                         part it missed and join, instead of discarding a
+                         full-quality decode of the whole prefix (default: 0)
+    DHWANI_SPEC_PERIODIC_S  seconds; arm a speculation this often even without
+                         trailing silence, so a speaker who never pauses still
+                         gets one (default: 0 = silence-triggered only)
+    DHWANI_MIX_PARALLEL  1 = start the primary decode alongside the mix decode
+                         on Indic clips, making pure Hindi cost max() instead of
+                         sum() (default: 0 = sequential mix-first)
+    DHWANI_PARTIALS      0 = never run the unscored LocalAgreement partial
+                         worker, freeing the accelerator entirely for the
+                         decodes that do earn points (default: 1)
+    DHWANI_FC_LANG_PIN   0 = re-detect the language on every committed window
+                         instead of pinning it from the first (default: 1)
+    DHWANI_SPEC_SILENCE_S / DHWANI_SPEC_MIN_AUDIO_S / DHWANI_COMMIT_MIN_S /
+    DHWANI_PAUSE_S / DHWANI_SETTLE_S / DHWANI_MIN_DECODE_S /
+    DHWANI_MIX_MIN_S / DHWANI_HARD_WAIT_S
+                         the timing constants at the top of this file, made
+                         sweepable; each defaults to its literal
 """
 from __future__ import annotations
 
@@ -101,6 +156,30 @@ HARD_WAIT_S = 20.0       # only ever waited when the alternative is a blank fina
 
 _INDIC = {"hi", "mr", "ne", "sa", "ur", "bh", "mai"}
 _PUNCT = re.compile(r"[^\w]", re.UNICODE)
+
+
+def _env_f(name: str, default: float) -> float:
+    """A tuning constant, overridable per-run.
+
+    Every timing constant above was chosen on a box that decodes 10-20x slower
+    than the scoring host, so none of them has ever been swept where it matters.
+    Reading them through here costs one dict lookup per call and makes the whole
+    set a sweepable axis on a machine that can actually measure the clock. The
+    literal above stays the default, so an unset environment is byte-identical
+    behaviour to before.
+    """
+    try:
+        raw = os.environ.get(name)
+        return default if raw in (None, "") else float(raw)
+    except ValueError:
+        return default
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw not in ("0", "false", "no", "off")
 
 _models: dict[str, object] = {}
 _locks: dict[str, threading.Lock] = {}
@@ -161,6 +240,14 @@ def _log_error(context: str, exc: BaseException) -> None:
     traceback.print_exc(file=sys.stderr)
 
 
+def _log_note(message: str) -> None:
+    """Expected degradation, not a failure. A capability ladder walking down a
+    rung is normal traffic on an unfamiliar runtime; printing a traceback for
+    each one buries the line that matters in the run log."""
+    import sys
+    print(f"[dhwani] {message}", file=sys.stderr)
+
+
 # --- contract -------------------------------------------------------------
 
 def draft_reset() -> None:
@@ -213,8 +300,9 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
         # (Letting it run alongside them was tried and measured worse: two
         # concurrent decodes on one accelerator slow both, and the partial is
         # the one that doesn't earn points.)
-        if not _busy and not _spec_alive() and not _fc_busy and \
-                len(audio_buffer) - _committed_bytes >= int(MIN_DECODE_S * BYTES_PER_SEC):
+        if _partials_enabled() and not _busy and not _spec_alive() and not _fc_busy and \
+                len(audio_buffer) - _committed_bytes >= \
+                int(_env_f("DHWANI_MIN_DECODE_S", MIN_DECODE_S) * BYTES_PER_SEC):
             _busy = True
             try:
                 threading.Thread(target=_worker, args=(audio_buffer, _clip_gen),
@@ -236,6 +324,26 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
 
 
 # --- decoding -------------------------------------------------------------
+
+def _partials_enabled() -> bool:
+    """Whether to run the LocalAgreement partial worker at all.
+
+    Partials are explicitly worth ZERO points — the protocol calls them optional
+    messages that never affect the score — yet they are the only thing besides
+    the speculator and the committer competing for the one accelerator. The
+    worker already yields to both, but yielding is not the same as being absent:
+    a partial that started a frame before the speculator wanted to arm still
+    holds the GPU for its whole decode, and _maybe_speculate() refuses to arm
+    while `_busy`. Turning them off is therefore a pure-latency experiment with
+    no quality axis to lose, and it has never been measurable on a box where the
+    clock itself could not be read.
+
+    The cost, if any, is the `live` half of _best_effort_text(): with partials
+    off, the fallback of last resort is the committed windows and a completed
+    speculation only. Default ON — this is an experiment, not a decision.
+    """
+    return _env_flag("DHWANI_PARTIALS", True)
+
 
 def _worker(audio: bytes, gen: int | None = None) -> None:
     global _busy
@@ -268,6 +376,12 @@ def _finalize(audio: bytes) -> tuple[str, int]:
     global _LAST_FINAL_PATH
     import time as _time
     deadline = _time.monotonic() + _final_budget_s()
+    # The harness gives up on a final after 20s (evaluator.py: asyncio.wait_for
+    # on the receive task) and scores the clip a hard ZERO for a dropped final —
+    # worse than any late transcript, and not recoverable by quality. Every wait
+    # below is bounded by this, so the sum of the budget and the
+    # never-return-blank wait can never reach it. Previously they added to 23s.
+    hard_stop = _time.monotonic() + _env_f("DHWANI_HARD_STOP_S", 18.0)
 
     # Joins the in-flight speculation for the WHOLE remaining budget, leaving
     # the tail decode nothing if that wait fails. Holding back a reserve for the
@@ -282,6 +396,17 @@ def _finalize(audio: bytes) -> tuple[str, int]:
         _LAST_FINAL_PATH = "speculation"
         return (text, len(text))
 
+    # A speculation that speech overtook is not worthless: decode only the part
+    # it missed and join (see _start_spec_join). Off by default.
+    join = _start_spec_join(audio, deadline)
+    if join is not None:
+        jt, jbox = join
+        jt.join(timeout=max(0.0, deadline - _time.monotonic()))
+        jtext = jbox.get("text", "")
+        if jtext.strip():
+            _LAST_FINAL_PATH = "spec-join"
+            return (jtext, len(jtext))
+
     worker, box = _start_final_decode(audio, deadline)
     worker.join(timeout=max(0.0, deadline - _time.monotonic()))
     text = box.get("text", "")
@@ -289,18 +414,78 @@ def _finalize(audio: bytes) -> tuple[str, int]:
         _LAST_FINAL_PATH = "tail-decode"
         return (text, len(text))
 
+    # Only hand back the fallback if it is a TRANSCRIPT rather than a fragment.
+    # Non-blank is not the test: the measured disaster returned 0.17 meaning and
+    # a fact flip, which is worth less than a final arriving three seconds late.
     fallback = _best_effort_text()
-    if fallback.strip():
+    if fallback.strip() and _best_effort_is_trustworthy(audio):
         _LAST_FINAL_PATH = "best-effort"
         return (fallback, len(fallback))
 
     # Nothing in hand at all. Returning now would be a BLANK final, which the
     # scorecard scores 0 for the clip — strictly worse than a late one, which
     # still scores its quality (capped 70 past 4s, 50 past 6s). So keep waiting.
-    worker.join(timeout=HARD_WAIT_S)
-    _LAST_FINAL_PATH = "overrun-wait"
-    text = box.get("text", "") or _best_effort_text()
+    # Stop short of hard_stop so the last resort below still gets a turn. This
+    # is NOT the reserve that was measured harmful earlier: that one abandoned a
+    # healthy speculation which then went on to land. By this line the decode
+    # has already missed the budget AND the long wait, so it is hung, and
+    # holding a couple of seconds back costs nothing that was going to arrive.
+    last_resort_s = _env_f("DHWANI_LAST_RESORT_S", 2.5)
+    worker.join(timeout=max(0.0, min(_env_f("DHWANI_HARD_WAIT_S", HARD_WAIT_S),
+                                     hard_stop - last_resort_s - _time.monotonic())))
+    if box.get("text", "").strip():
+        _LAST_FINAL_PATH = "overrun-wait"
+        text = box["text"]
+        return (text, len(text))
+    text = _best_effort_text()
+    if text.strip():
+        _LAST_FINAL_PATH = "overrun-wait"
+        return (text, len(text))
+
+    # Everything above has now failed, including the fallback that exists so
+    # this cannot happen. Two rounds were submitted where exactly this held on
+    # every clip, and the engine returned "" each time. A blank is the hardest
+    # cap on the card — 0 for the clip, no partial credit — so the correct move
+    # is one more decode, of any quality, at any cost, with every optional
+    # argument stripped off. Anything it returns is worth more than nothing.
+    text = _last_resort_decode(audio, max(0.0, hard_stop - _time.monotonic()))
+    _LAST_FINAL_PATH = "last-resort" if text.strip() else "blank"
     return (text, len(text))
+
+
+def _last_resort_decode(audio: bytes, seconds: float) -> str:
+    """The bare minimum: greedy, no prompt, no language, no options at all.
+
+    Deliberately bypasses _decode_final_segment and the whole router — those
+    are where the unsupported-argument failures live, and this runs precisely
+    when they have all failed. Straight at the backend, cheapest possible call,
+    both backends tried in turn.
+
+    Bounded, because the harness drops a clip that never answers (a hard zero,
+    strictly worse than a blank). If a decode is hung, this one will hang too;
+    `seconds` makes that survivable instead of fatal.
+    """
+    box: dict[str, str] = {}
+
+    def _run() -> None:
+        for backend in ("current", "ctranslate2"):
+            try:
+                if backend == "ctranslate2" and _resolve_backend() == "ctranslate2":
+                    break                  # already tried as "current"
+                if backend == "ctranslate2":
+                    globals()["_backend"] = "ctranslate2"
+                words, lang = _transcribe(audio, None, "", final=False, fast=True)
+                text = _normalize_numbers(_deloop(_text_from(words, lang or "en")))
+                if text.strip():
+                    box["text"] = text
+                    return
+            except Exception as exc:
+                _log_error(f"last-resort decode via {backend} backend", exc)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=max(0.0, seconds))
+    return box.get("text", "")
 
 
 MIX_MIN_S = 1.0     # don't start the mix decode with less than this left
@@ -312,17 +497,47 @@ def _time_for_mix(deadline: float | None) -> bool:
     if deadline is None:
         return True
     import time as _time
-    return (deadline - _time.monotonic()) >= MIX_MIN_S
+    return (deadline - _time.monotonic()) >= _env_f("DHWANI_MIX_MIN_S", MIX_MIN_S)
 
 
 def _final_budget_s() -> float:
-    """Wall-clock the final call may spend. The published curve pays full marks
-    at <=1000ms and nothing past 5000ms, so this sits low enough to stay inside
-    the band even when a decode runs long on an unfamiliar machine."""
+    """Wall-clock the final call may spend before giving up on a real decode.
+
+    This was 3.0 for three rounds, on the reasoning that the latency curve pays
+    nothing past 5000ms so the final must never approach it. That reasoning read
+    the curve and ignored the caps, and it was backwards.
+
+    The caps in streaming_scorecard apply to the TOTAL, not to quality, and they
+    are gentle: a final past 4000ms caps the clip at 70, past 6000ms at 50.
+    Meanwhile the thing the budget does when it expires — return
+    _best_effort_text() — is not a slightly worse transcript, it is the rolling
+    LocalAgreement partials, which is the exact text the whole engine was built
+    to keep out of the final.
+
+    Measured on the same clip, same machine, two runs minutes apart, the only
+    difference being which side of the 3.0s budget it landed on:
+
+        2512ms, real decode      meaning 0.86, no flip   -> clip scores 83.2
+        3005ms, best-effort       meaning 0.17, FACT FLIP -> clip scores 24.7
+
+    And the counterfactual, had it simply been allowed to finish:
+
+        real decode at 3500ms -> 75.2      at 5500ms -> 63.2
+        real decode at 4500ms -> 69.2      at 6500ms -> 50.0  (worst case)
+
+    Every one of those beats 24.7. The budget was spending ~50 points of quality
+    to buy at most 16 points of latency. So it now sits just under the 6000ms
+    cap edge, where a late real decode still scores its quality out of 70, and
+    it exists only to stop a genuinely hung decode from hanging forever.
+
+    Being fast is still worth 30 points and is still the goal — but it has to
+    come from finishing sooner (speculation, a cheaper model), never from
+    returning worse text on time.
+    """
     try:
-        return max(0.2, float(os.environ.get("DHWANI_FINAL_BUDGET_S", "3.0")))
+        return max(0.2, float(os.environ.get("DHWANI_FINAL_BUDGET_S", "5.4")))
     except ValueError:
-        return 3.0
+        return 5.4
 
 
 def _start_final_decode(audio: bytes, deadline: float | None = None) -> tuple[threading.Thread, dict]:
@@ -340,6 +555,28 @@ def _start_final_decode(audio: bytes, deadline: float | None = None) -> tuple[th
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     return t, box
+
+
+def _best_effort_is_trustworthy(audio: bytes) -> bool:
+    """Is the text we already hold a transcript of the CLIP, or a fragment?
+
+    _best_effort_text() is never blank once anything has decoded, so "did it
+    return something" is not the question. The question is whether that
+    something covers the audio. Two sources are real decodes with full context —
+    the committed windows and a completed speculation — and both report how many
+    bytes they account for. The third, the rolling LocalAgreement partials, is a
+    1-3s sliding window on a small model and is the text that scored 0.17
+    meaning with a fact flip on a clip whose real decode scored 0.86.
+
+    So: trust the fallback when a real decode covers most of the clip, and
+    otherwise keep waiting. The scorecard makes that trade obvious — a real
+    final at 6500ms still scores 50 for the clip, and the fragment scored 24.7.
+    """
+    if not audio:
+        return True
+    with _state_lock:
+        covered = max(_fc_bytes, _spec_covered)
+    return covered >= _env_f("DHWANI_BE_MIN_COVER", 0.6) * len(audio)
 
 
 def _best_effort_text() -> str:
@@ -382,6 +619,21 @@ def _chunk_s() -> float:
         return float(os.environ.get("DHWANI_CHUNK_S", "12") or 0)
     except ValueError:
         return 12.0
+
+
+def _fc_lang_pin() -> bool:
+    """Whether the first closed window PINS the language for the whole clip.
+
+    Pinning is cheap (later windows skip detection) and correct on monolingual
+    audio. It is also the named suspect in the DHWANI_CHUNK_S=6 regression: the
+    worst clip there was Hinglish, where the first window pinned a language the
+    rest of the clip did not keep, and it came back with a NEW fact flip. That
+    hypothesis has never been tested separately from the window size that
+    exposed it, because on this hardware windows almost never closed at all.
+    DHWANI_FC_LANG_PIN=0 re-detects per window and lets the two be measured
+    apart. Default ON — unchanged behaviour.
+    """
+    return _env_flag("DHWANI_FC_LANG_PIN", True)
 
 
 def _join_final(prefix: str, tail: str) -> str:
@@ -482,12 +734,43 @@ def _indic_hint(pinned_lang: str | None) -> bool:
 
 def _mix_decode(audio: bytes, prompt: str = "", fast: bool = False) -> str:
     """One decode on DHWANI_MIX_MODEL, through whichever backend it needs."""
-    if _mix_backend() == "transformers":
+    backend = _mix_backend()
+    if backend == "mlx":
+        converted = _mix_mlx_dir(convert=False)
+        if converted:
+            try:
+                words, _ = _transcribe(audio, "hi", prompt=prompt, final=True,
+                                       fast=fast, model=converted)
+                return _deloop(_text_from(words, "hi"))
+            except Exception as exc:
+                # Never lose the clip to the optimisation: same call, slower path.
+                _log_error("mix decode via converted mlx — retrying transformers", exc)
+        backend = "transformers"       # conversion missing or failed; still correct
+    if backend == "transformers":
         words, _ = _transcribe_mix_transformers(audio)
     else:
         words, _ = _transcribe(audio, "hi", prompt=prompt, final=True, fast=fast,
                                model=_mix_model())
     return _deloop(_text_from(words, "hi"))
+
+
+def _start_primary_decode(audio: bytes, lang: str | None, prompt: str, fast: bool,
+                          model: str | None) -> tuple[threading.Thread, dict]:
+    """Run the primary decode in a worker so it can overlap the mix decode.
+    Never killed, only abandoned — a result nobody reads costs nothing."""
+    box: dict = {}
+
+    def _run() -> None:
+        try:
+            words, raw = _transcribe(audio, lang, prompt=prompt, final=True,
+                                     fast=fast, model=model)
+            box["words"], box["raw"] = words, raw
+        except Exception as exc:
+            _log_error("parallel primary decode", exc)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t, box
 
 
 def _decode_final_segment(audio: bytes, pinned_lang: str | None,
@@ -544,19 +827,50 @@ def _decode_final_segment(audio: bytes, pinned_lang: str | None,
     # only in the other order, at the same cost, reusing this candidate below.
     mix_first: str | None = None
     mix_first_cost = 0.0
+    primary_thread: threading.Thread | None = None
+    primary_box: dict = {}
     if (mix and _indic_hint(pinned_lang) and gate != "codeswitch"
             and _time_for_mix(deadline)):
         import time as _time
+        # PARALLEL (DHWANI_MIX_PARALLEL, off by default). Mix-first is a strict
+        # win on code-switched clips, where the primary is never run. On PURE
+        # Hindi it is only a reordering: both decodes still run, one after the
+        # other, and that pair is the slowest final this engine produces.
+        #
+        # Starting the primary now, alongside the mix decode, makes pure Hindi
+        # cost max(mix, primary) instead of mix + primary, and costs nothing on
+        # code-switched clips — the mix answer returns and the primary thread is
+        # simply abandoned unread, with no other work left to contend with.
+        #
+        # The open question is whether two decodes on ONE accelerator actually
+        # overlap or merely serialise while slowing each other down. That is a
+        # property of the scoring host's GPU, not of this code, which is exactly
+        # why it ships off and gets measured on Apple hardware.
+        if _env_flag("DHWANI_MIX_PARALLEL"):
+            primary_thread, primary_box = _start_primary_decode(
+                audio, lang0, prompt, fast, primary_model)
         _t0 = _time.monotonic()
         try:
             mix_first = _mix_decode(audio, prompt=prompt, fast=fast)
         except Exception as exc:
             _log_error(f"finalize/mix-first (model={mix!r})", exc)
         mix_first_cost = _time.monotonic() - _t0
-        if (mix_first and not _looks_bad(mix_first)
-                and len(_latin_tokens(mix_first)) >= MIX_FIRST_LATIN_MIN
-                and _DEVANAGARI.search(mix_first)):
-            return mix_first, "hi"
+        if mix_first and not _looks_bad(mix_first) and _DEVANAGARI.search(mix_first):
+            code_switched = len(_latin_tokens(mix_first)) >= MIX_FIRST_LATIN_MIN
+            # MIX-ONLY. On code-switched audio the primary was already skipped
+            # because the mix answer wins outright. On PURE Hindi it used to run
+            # anyway, worth a measured +5.8/70 of quality — and that trade only
+            # ever looked good while the clock was invisible.
+            #
+            # Priced on real hardware it is clearly negative. The primary costs
+            # a whole extra decode (1.4s on an M4 Pro, more on the M1 Pro this
+            # is scored on), which moves a ~2.1s final to ~3.5s: 23 latency
+            # points down to 12. Paying 11 points to buy 5.8 is not a trade
+            # worth making, and it gets worse on slower hardware, not better.
+            #
+            # DHWANI_MIX_ONLY=0 restores the pair, and the sweep measures both.
+            if code_switched or _env_flag("DHWANI_MIX_ONLY", True):
+                return mix_first, "hi"
         # Not code-switched, so the primary IS worth running on this audio —
         # measured at ~5.8/70 on pure Hindi. But only if it fits.
         #
@@ -574,12 +888,23 @@ def _decode_final_segment(audio: bytes, pinned_lang: str | None,
         # primary below is unconditional.
         if mix_first and deadline is not None:
             left = deadline - _time.monotonic()
-            if left < max(mix_first_cost, MIX_MIN_S):
+            if left < max(mix_first_cost, _env_f("DHWANI_MIX_MIN_S", MIX_MIN_S)):
                 return mix_first, "hi"
 
     try:
-        words, raw = _transcribe(audio, lang0, prompt=prompt, final=True, fast=fast,
-                                 model=primary_model)
+        if primary_thread is not None:
+            import time as _time
+            primary_thread.join(timeout=(None if deadline is None
+                                         else max(0.0, deadline - _time.monotonic())))
+            if "words" not in primary_box:
+                # Still running (or it raised). Leave `text` empty and let the
+                # escalation below fall back to mix_first, exactly as it does
+                # when the primary decode fails for any other reason.
+                raise TimeoutError("parallel primary decode did not finish in budget")
+            words, raw = primary_box["words"], primary_box["raw"]
+        else:
+            words, raw = _transcribe(audio, lang0, prompt=prompt, final=True, fast=fast,
+                                     model=primary_model)
         lang = pinned_lang or ("hi" if raw in _INDIC else raw)
         text = _deloop(_text_from(words, lang))
     except Exception as exc:
@@ -719,7 +1044,7 @@ def _decode_and_commit(audio: bytes, final: bool, gen: int | None = None) -> Non
         lang = _lang
 
     window = audio[start_bytes:]
-    if len(window) < int(MIN_DECODE_S * BYTES_PER_SEC) and not final:
+    if len(window) < int(_env_f("DHWANI_MIN_DECODE_S", MIN_DECODE_S) * BYTES_PER_SEC) and not final:
         return
     if not window:
         return
@@ -854,11 +1179,104 @@ def _mix_model() -> str | None:
 
 
 def _mix_backend() -> str:
+    """Which runtime decodes the mix model.
+
+    Defaults to MLX whenever the primary is on MLX and a converted copy exists,
+    because on Apple silicon the transformers/MPS path is the single most
+    expensive thing this engine does. Measured on an M4 Pro, per clip, both
+    padded to whisper's 30s window so neither scales with clip length:
+
+        zero-stt-hinglish via transformers/MPS   2.16s
+        whisper-medium    via mlx                1.08s   <- same size class
+        large-v3-turbo    via mlx                1.41s
+
+    zero-stt IS a whisper-medium fine-tune, so that 2x is the runtime, not the
+    model. On every Indic clip the mix decode is the whole end-to-final, which
+    makes this worth more than any other single change available: 2.16s is 21
+    latency points, 1.08s is 30.
+    """
     forced = os.environ.get("DHWANI_MIX_BACKEND")
     if forced:
         return forced
     mix = _mix_model()
-    return "transformers" if (mix and "/" in mix) else "native"
+    if not mix:
+        return "native"
+    if "/" not in mix:
+        return "native"
+    if _resolve_backend() == "mlx" and _mix_mlx_dir(convert=False):
+        return "mlx"
+    return "transformers"
+
+
+def _mix_mlx_dir(convert: bool = False) -> str | None:
+    """Path to an MLX copy of the mix model, converting it if asked.
+
+    Conversion runs ONCE, in warm_models(), while the network is still up — it
+    downloads the HF checkpoint and rewrites the weights. It must never happen
+    on the scored path: at decode time this only reports a directory that
+    already exists, so a missing conversion silently costs speed and never
+    correctness (the transformers path still works).
+
+    DHWANI_MIX_MLX_PATH points at a pre-converted directory and skips all of it.
+    DHWANI_MIX_MLX=0 disables the whole thing.
+    """
+    if not _env_flag("DHWANI_MIX_MLX", True):
+        return None
+    explicit = os.environ.get("DHWANI_MIX_MLX_PATH")
+    if explicit:
+        return explicit if os.path.isdir(explicit) else None
+    repo = _mix_model()
+    if not repo or "/" not in repo:
+        return None
+
+    cache = os.environ.get("DHWANI_MLX_CACHE") or os.path.join(
+        os.path.expanduser("~"), ".cache", "dhwani-mlx")
+    out = os.path.join(cache, repo.replace("/", "--"))
+    # The VERIFIED marker is written by warm_models only after a REAL decode
+    # through the converted weights succeeds. Weights alone are not enough: a
+    # conversion that writes plausible tensors mlx cannot actually run would
+    # otherwise fail on the first scored clip instead of at warm time.
+    has_weights = (os.path.exists(os.path.join(out, "weights.safetensors"))
+                   or os.path.exists(os.path.join(out, "weights.npz")))
+    if os.path.isdir(out) and has_weights and \
+            os.path.exists(os.path.join(out, "VERIFIED")):
+        return out
+    if not convert:
+        return None
+    return _convert_mix_to_mlx(repo, out)
+
+
+def _convert_mix_to_mlx(repo: str, out: str) -> str | None:
+    """Run mlx_whisper's converter. Every failure mode ends in None, which means
+    'use transformers' — this is an optimisation, never a dependency.
+
+    The CLI's flag names have moved between mlx_whisper releases, so both known
+    spellings are tried before giving up. Deliberately a subprocess: conversion
+    loads the torch checkpoint and the MLX arrays at the same time, and doing
+    that inside the server process would leave both resident for the whole run.
+    """
+    import subprocess
+    import sys
+
+    # solution/hf_to_mlx.py, ours. The obvious tool — `python -m
+    # mlx_whisper.convert` — does not exist: the PyPI wheel ships no converter
+    # module at all, which is why the first Apple run silently stayed on
+    # transformers. Learned by listing the wheel's contents, not from any error
+    # that surfaced on its own.
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    cmd = [sys.executable, "-m", "solution.hf_to_mlx", repo, out]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800,
+                              cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    except Exception as exc:      # noqa: BLE001
+        _log_note(f"mix->mlx conversion could not start ({type(exc).__name__}: {exc})")
+        return None
+    if os.path.exists(os.path.join(out, "weights.safetensors")):
+        _log_note(f"mix model converted to MLX at {out}")
+        return out
+    _log_note("mix->mlx conversion failed: "
+              f"{(proc.stderr or proc.stdout or '')[-300:].strip()}")
+    return None
 
 
 # --- transformers mix backend — runs any HF whisper fine-tune unconverted. ---
@@ -939,11 +1357,24 @@ def _transcribe_mix_transformers(window: bytes):
         # cost is dominated by the fixed encoder pass, so a wider beam is close
         # to free: measured 22.25s vs 24.12s greedy on the primary.
         beams = _mix_beam()
-        kwargs = {"task": "transcribe"}
+        attempts: list[dict] = [{"task": "transcribe"}, {}]
         if beams > 1:
-            kwargs["num_beams"] = beams
-        with torch.inference_mode():
-            ids = model.generate(feats, **kwargs)
+            attempts.insert(0, {"task": "transcribe", "num_beams": beams})
+        # Same lesson as the MLX ladder, applied before it costs anything: a
+        # generate() kwarg this transformers version dislikes must degrade the
+        # call, not delete the transcript. `task` in particular has moved
+        # between generate() and the processor across transformers majors.
+        ids, last = None, None
+        for kwargs in attempts:
+            try:
+                with torch.inference_mode():
+                    ids = model.generate(feats, **kwargs)
+                break
+            except Exception as exc:      # noqa: BLE001 — next attempt handles it
+                last = exc
+                _log_error(f"mix generate rejected kwargs={sorted(kwargs)}", exc)
+        if ids is None:
+            raise last if last is not None else RuntimeError("mix generate failed")
         texts.append(proc.batch_decode(ids, skip_special_tokens=True)[0].strip())
     text = " ".join(t for t in texts if t).strip()
     dur = len(window) / BYTES_PER_SEC
@@ -1005,7 +1436,28 @@ def warm_models() -> None:
         return
     names = [_model_name(True), _model_name(False)]
     if _mix_model():
-        if _mix_backend() == "transformers":
+        # Convert the mix model to MLX now, while the network is up and nothing
+        # is being timed. At scoring time HF_HUB_OFFLINE is set and the final is
+        # on the clock, so this is the only moment it can happen.
+        converted = None
+        if backend == "mlx":
+            try:
+                converted = _mix_mlx_dir(convert=True)
+                if converted and not os.path.exists(os.path.join(converted, "VERIFIED")):
+                    # Prove the converted weights DECODE before trusting them
+                    # with a scored clip. Half a second of silence is enough:
+                    # the question is only whether mlx can run the graph.
+                    _transcribe_mlx(b"\x00\x00" * int(0.5 * SR), lang="hi", prompt="",
+                                    model_name=converted, final=False)
+                    with open(os.path.join(converted, "VERIFIED"), "w") as fh:
+                        fh.write("decoded ok\n")
+                    _log_note(f"mix mlx conversion verified at {converted}")
+            except Exception as exc:
+                _log_error("warm_models/mix->mlx conversion — using transformers", exc)
+                converted = None
+        if converted:
+            names.append(converted)
+        elif _mix_backend() == "transformers":
             try:
                 _get_mix_transformers(_mix_model())   # downloads + loads once
             except Exception as exc:
@@ -1021,6 +1473,48 @@ def warm_models() -> None:
                 _get_model_ctranslate2(name)
         except Exception as exc:
             _log_error(f"warm_models/{name} — continuing anyway", exc)
+    _verify_final_path()
+
+
+def _verify_final_path() -> None:
+    """Prove the SCORED decode path runs on this machine, before a clip does.
+
+    Two submitted rounds scored zero because it did not. The mlx backend is
+    selected automatically whenever mlx_whisper imports, was never executable on
+    any machine available here, and the first evidence that it did not work
+    arrived as an email from the organisers weeks later. A warm-up that only
+    loads models cannot catch that: the models loaded fine. What failed was the
+    call SHAPE of the final decode.
+
+    So run the real thing once — the same _transcribe(final=True) the scored
+    path uses — on a scrap of audio. A blank result is fine and expected on
+    noise; the question being asked is only whether it RAISES. If it does, the
+    backend cannot produce finals here, and a slow transcript beats no
+    transcript by the entire value of the clip, so drop to CTranslate2 for the
+    rest of the process.
+
+    DHWANI_VERIFY=0 disables it. Never raises: a broken self-check must not be
+    worse than no self-check.
+    """
+    global _backend
+    if not _env_flag("DHWANI_VERIFY", True) or _resolve_backend() != "mlx":
+        return
+    import numpy as np
+    probe = (np.sin(np.arange(int(1.0 * SR)) * 0.07) * 6000).astype(np.int16).tobytes()
+    try:
+        _transcribe(probe, None, "", final=True, fast=False)
+        return
+    except Exception as exc:
+        _log_error("SELF-CHECK: the mlx final path raised — falling back to "
+                   "ctranslate2 for this process. Finals will be slower and "
+                   "will not be blank", exc)
+    try:
+        _backend = "ctranslate2"
+        _get_model_ctranslate2(_model_name(True))
+    except Exception as exc:
+        _log_error("SELF-CHECK: ctranslate2 fallback also failed — leaving the "
+                   "backend as-is and relying on the per-decode ladders", exc)
+        _backend = "mlx"
 
 
 def _detect_language(audio: bytes, final: bool) -> str | None:
@@ -1041,6 +1535,33 @@ def _detect_language(audio: bytes, final: bool) -> str | None:
 # streaming path fell into "अद्राद अद्राद..." loops and Malay hallucinations.
 # The final decode re-enables the fallback ladder; partials stay greedy for speed.
 _FINAL_TEMPS = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+
+
+def _final_temps() -> tuple:
+    """The temperature ladder for the quality final, as a sweepable list.
+
+    Worth measuring rather than assuming, because it cuts both ways and both
+    sides are large. When whisper's thresholds fire, the ladder re-decodes the
+    same audio once per temperature — up to six sequential decodes, and the
+    speculation that runs it is joined for the WHOLE remaining budget by
+    _finalize, so a ladder that fires lands directly on the 30-point latency
+    axis. Shortening it is the single biggest latency lever that does not
+    change a model.
+
+    Against that, the ladder is whisper's own anti-hallucination mechanism, and
+    removing it is what put the streaming path into "अद्राद अद्राद..." loops.
+    A repetition loop is a hard 30-point cap on its clip.
+
+    DHWANI_FINAL_TEMPS="0.0,0.4" sets a shorter one; "0.0" disables it entirely.
+    """
+    raw = os.environ.get("DHWANI_FINAL_TEMPS")
+    if not raw:
+        return _FINAL_TEMPS
+    try:
+        temps = tuple(float(x) for x in raw.split(",") if x.strip() != "")
+        return temps or _FINAL_TEMPS
+    except ValueError:
+        return _FINAL_TEMPS
 
 
 def _transcribe(window: bytes, lang: str | None, prompt: str, final: bool = False,
@@ -1082,24 +1603,42 @@ def _detect_language_ctranslate2(audio: bytes) -> str | None:
 
 
 def _beam_size(final: bool) -> int:
-    """Beam width for the scored final. Greedy (1) was costing real points:
-    measured on the English clips, beam 5 recovered a rare word the greedy
-    decode misheard ("alkaline" -> "acolyte") and took the set from 53.26 to
-    58.23 of 70, one fewer fact flip. A flip caps its clip at 50, so this is
-    worth far more than the extra decode time. Partials stay greedy — they are
-    unscored and must not steal the accelerator."""
+    """Beam width for the scored final. GREEDY, and that is now a correctness
+    requirement rather than a speed/quality trade.
+
+    History, because the number in this docstring used to say 5 and the reason
+    it did was real: measured on the English clips, beam 5 recovered a rare word
+    greedy misheard ("alkaline" -> "acolyte"), 53.26 -> 58.23 of 70 with one
+    fewer fact flip. That measurement stands. It was taken on CTranslate2, on a
+    Windows box.
+
+    It was then shipped into a path that only ever runs on MLX, which no machine
+    here could execute. builderr's runtime does not support beam search in
+    mlx_whisper, and the result was not a slower decode or a worse one — it was
+    a BLANK final on every clip, across two submitted rounds, both of which
+    scored zero and neither of which we could see. Their words: "the default MLX
+    path requests beam search, which the scoring runtime does not support, so
+    every final came back blank."
+
+    So: greedy everywhere by default. Beam on MLX is separately opt-in via
+    DHWANI_MLX_BEAM and still passes through the capability ladder in
+    _transcribe_mlx, so even asking for it explicitly cannot blank a decode.
+    The English quality beam was buying has to come from somewhere that works on
+    the backend being scored — a stronger checkpoint for English finals
+    (DHWANI_EN_MODEL), which is a model choice and not an API gamble.
+    """
     if not final:
         return 1
     try:
-        return max(1, int(os.environ.get("DHWANI_BEAM", "5")))
+        return max(1, int(os.environ.get("DHWANI_BEAM", "1")))
     except ValueError:
-        return 5
+        return 1
 
 
 def _transcribe_ctranslate2(audio, lang, prompt, model_name, final=False):
     model, lock = _get_model_ctranslate2(model_name)
     extra = dict(
-        temperature=list(_FINAL_TEMPS),
+        temperature=list(_final_temps()),
         compression_ratio_threshold=2.4,
         log_prob_threshold=-1.0,
         no_speech_threshold=0.6,
@@ -1115,11 +1654,19 @@ def _transcribe_ctranslate2(audio, lang, prompt, model_name, final=False):
             initial_prompt=prompt or None,
             **extra,
         )
+        segs = list(segments)          # a generator: materialise before reuse
         words = [
             (w.word, w.start, w.end)
-            for seg in segments
+            for seg in segs
             for w in (seg.words or [])
         ]
+        if not words:
+            # Same silent-blank hazard as the mlx path: word timings can come
+            # back empty while seg.text holds a perfectly good transcript, and
+            # an empty word list becomes an empty final, which scores zero.
+            text = "".join(seg.text or "" for seg in segs).strip()
+            if text:
+                words = [(text, 0.0, max(0.1, len(audio) / SR))]
     return words, getattr(info, "language", None)
 
 
@@ -1180,6 +1727,111 @@ def _get_lock_mlx(repo: str) -> threading.Lock:
         return _locks[repo]
 
 
+# Which rung of the kwarg ladder below is known to work, per repo. Probed once
+# on first use and then reused, so the cost is one bad call per model per
+# process rather than one per clip.
+_MLX_LEVEL: dict[str, int] = {}
+_MLX_LEVEL_LOCK = threading.Lock()
+
+
+def _mlx_kwarg_levels(repo: str, lang: str | None, prompt: str, final: bool,
+                      beam: int) -> list[dict]:
+    """Progressively smaller argument sets for mlx_whisper.transcribe().
+
+    Rung 0 is everything we want. Each rung drops the next most likely thing to
+    be unsupported, and the last two are the calls the function cannot exist
+    without. The ladder always has the same SHAPE regardless of `final` or
+    `beam`, so a rung index cached for one call means the same thing for the
+    next — that is why rung 0 is allowed to be identical to rung 1 when no beam
+    was requested, instead of being deduplicated away.
+
+    This exists because the previous "fallback" re-sent the kwargs that had just
+    failed, from inside the `except` block that caught them. One unsupported
+    keyword therefore took down every decode in the process: the speculation,
+    the committed windows, the tail decode AND the partials — which is why
+    _best_effort_text() had nothing left to fall back to and the final came back
+    blank rather than merely degraded.
+    """
+    full: dict = dict(path_or_hf_repo=repo, language=lang, task="transcribe",
+                      condition_on_previous_text=False, word_timestamps=True,
+                      initial_prompt=prompt or None)
+    if final:
+        full.update(temperature=_final_temps(), compression_ratio_threshold=2.4,
+                    logprob_threshold=-1.0, no_speech_threshold=0.6)
+    else:
+        full.update(temperature=0.0)
+
+    with_beam = dict(full, beam_size=beam) if beam > 1 else dict(full)
+    no_thresholds = {k: v for k, v in full.items()
+                     if k not in ("compression_ratio_threshold", "logprob_threshold",
+                                  "no_speech_threshold", "condition_on_previous_text")}
+    no_prompt = {k: v for k, v in no_thresholds.items() if k != "initial_prompt"}
+    # Dropping word_timestamps is survivable: the text is still there, and
+    # _mlx_words() below synthesises one span from it. Losing the timings costs
+    # the partials their word-level agreement, never the scored final.
+    no_words = {k: v for k, v in no_prompt.items() if k != "word_timestamps"}
+    return [with_beam, full, no_thresholds, no_prompt, no_words,
+            dict(path_or_hf_repo=repo, language=lang, task="transcribe"),
+            dict(path_or_hf_repo=repo)]
+
+
+def _mlx_words(result: dict, duration_s: float) -> list:
+    """Word spans from an mlx_whisper result, and NEVER an empty list when the
+    model actually produced text.
+
+    The old code read segments[i]["words"] and stopped there. An mlx_whisper
+    build that returns segments without a "words" key — or that ignored
+    word_timestamps, or had it stripped by the ladder above — yielded [], which
+    _text_from turned into "", which is a BLANK final scoring zero. With the
+    transcript sitting in result["text"] the whole time. No exception, no log
+    line, nothing to notice: the single most expensive way for this engine to
+    fail. Timings only drive the unscored partials, so a whole-clip pseudo-span
+    is a complete substitute for the one thing that is scored.
+    """
+    words = [(w["word"], w["start"], w["end"])
+             for seg in (result.get("segments") or [])
+             for w in (seg.get("words") or [])
+             if isinstance(w, dict) and "word" in w]
+    if words:
+        return words
+    text = ""
+    for seg in (result.get("segments") or []):
+        text += seg.get("text") or ""
+    text = (text or result.get("text") or "").strip()
+    return [(text, 0.0, max(0.1, duration_s))] if text else []
+
+
+def _mlx_transcribe_raw(pcm, repo: str, lang: str | None, prompt: str,
+                        final: bool, beam: int) -> dict:
+    """Call mlx_whisper.transcribe(), walking down the ladder until one works."""
+    import mlx_whisper
+
+    levels = _mlx_kwarg_levels(repo, lang, prompt, final, beam)
+    start = _MLX_LEVEL.get(repo, 0)
+    last: BaseException | None = None
+    for i in range(start, len(levels)):
+        if i > start and levels[i] == levels[i - 1]:
+            continue          # rung 0 == rung 1 whenever no beam was requested
+        try:
+            result = mlx_whisper.transcribe(pcm, **levels[i])
+        except Exception as exc:      # noqa: BLE001 — the next rung IS the handler
+            # Deliberately catches everything, not TypeError. The guard this
+            # replaces caught TypeError only, and the failure that cost two
+            # rounds was mlx_whisper refusing beam search with a different
+            # exception class entirely — which sailed straight past it and out
+            # of the function. A rejected rung is expected traffic, so it logs
+            # one line rather than a traceback; total failure below is loud.
+            last = exc
+            _log_note(f"transcribe_mlx/{repo}: rung {i} rejected "
+                      f"({type(exc).__name__}: {str(exc)[:90]}) — trying a smaller call")
+            continue
+        if i != start:
+            with _MLX_LEVEL_LOCK:
+                _MLX_LEVEL[repo] = i          # remember, so this costs once
+        return result
+    raise last if last is not None else RuntimeError(f"mlx_whisper refused every call for {repo}")
+
+
 def _detect_language_mlx(audio: bytes) -> str | None:
     """mlx_whisper's public transcribe() only surfaces the argmax language
     (result["language"]), not the per-language probability list faster-whisper
@@ -1191,18 +1843,10 @@ def _detect_language_mlx(audio: bytes) -> str | None:
     repo = _mlx_repo(_model_name(final=True))
     lock = _get_lock_mlx(repo)
     try:
-        import mlx_whisper
         pcm = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
         with lock:
-            result = mlx_whisper.transcribe(
-                pcm,
-                path_or_hf_repo=repo,
-                language=None,
-                task="transcribe",
-                temperature=0.0,
-                condition_on_previous_text=False,
-                word_timestamps=False,
-            )
+            result = _mlx_transcribe_raw(pcm, repo, lang=None, prompt="",
+                                         final=False, beam=1)
         lang = result.get("language")
     except Exception as exc:
         _log_error(f"detect_language_mlx/{repo}", exc)
@@ -1219,54 +1863,13 @@ def _transcribe_mlx(window: bytes, lang: str | None, prompt: str, model_name: st
     if pcm.size == 0:
         return [], None
 
-    import mlx_whisper
-    kwargs = dict(
-        path_or_hf_repo=repo,
-        language=lang,
-        task="transcribe",
-        condition_on_previous_text=False,
-        word_timestamps=True,
-        initial_prompt=prompt or None,
-    )
-    if final and _beam_size(True) > 1:
-        # mlx_whisper exposes beam search on some versions only; the TypeError
-        # guard below drops it rather than losing the decode.
-        kwargs["beam_size"] = _beam_size(True)
-    if final:
-        kwargs.update(
-            temperature=_FINAL_TEMPS,
-            compression_ratio_threshold=2.4,
-            logprob_threshold=-1.0,
-            no_speech_threshold=0.6,
-        )
-    else:
-        kwargs.update(temperature=0.0)
+    # Beam on MLX is opt-in and separate from DHWANI_BEAM, which now defaults to
+    # greedy. Even when asked for, it is only the top rung of the ladder: an
+    # unsupported beam_size costs one rejected call, not the decode.
+    beam = _beam_size(True) if (final and _env_flag("DHWANI_MLX_BEAM")) else 1
     with lock:
-        try:
-            result = mlx_whisper.transcribe(pcm, **kwargs)
-        except TypeError as exc:
-            # An mlx_whisper version that doesn't accept one of the threshold
-            # kwargs — degrade to the minimal call rather than drop the final.
-            _log_error(f"transcribe_mlx/{repo} (kwarg mismatch, retrying minimal)", exc)
-            result = mlx_whisper.transcribe(
-                pcm, path_or_hf_repo=repo, language=lang, task="transcribe",
-                temperature=_FINAL_TEMPS if final else 0.0,
-                word_timestamps=True, condition_on_previous_text=False,
-                initial_prompt=prompt or None,
-            )
-        except Exception as exc:
-            # Anything else — a missing/misnamed repo, a network error, a real
-            # mlx/mlx_whisper bug — log with full context (repo id, model size)
-            # and re-raise so _finalize's Hindi-retry / last-resort logic still
-            # gets a chance, instead of this vanishing into a blank final.
-            _log_error(f"transcribe_mlx/{repo} (final={final})", exc)
-            raise
-    words = [
-        (w["word"], w["start"], w["end"])
-        for seg in (result.get("segments") or [])
-        for w in (seg.get("words") or [])
-    ]
-    return words, result.get("language")
+        result = _mlx_transcribe_raw(pcm, repo, lang, prompt, final, beam)
+    return _mlx_words(result, len(window) / BYTES_PER_SEC), result.get("language")
 
 
 # --- speechanalyzer backend — Apple's on-device SpeechAnalyzer via a Swift CLI.
@@ -1404,7 +2007,7 @@ def _silence_threshold(rms) -> float:
 
 
 def _tail_is_silent(rms, thr) -> bool:
-    n = max(1, int(SPEC_SILENCE_S / FRAME_S))
+    n = max(1, int(_env_f("DHWANI_SPEC_SILENCE_S", SPEC_SILENCE_S) / FRAME_S))
     tail = rms[-n:]
     return len(tail) >= n and bool((tail < thr).all())
 
@@ -1421,7 +2024,7 @@ def _maybe_speculate(audio: bytes) -> None:
     global _spec_thread, _spec_started
     if not _speculation_enabled() or _finalizing or _spec_alive() or _fc_busy:
         return
-    if len(audio) < int(SPEC_MIN_AUDIO_S * BYTES_PER_SEC):
+    if len(audio) < int(_env_f("DHWANI_SPEC_MIN_AUDIO_S", SPEC_MIN_AUDIO_S) * BYTES_PER_SEC):
         return
     rms = _frame_rms(audio)
     if rms is None:
@@ -1429,7 +2032,22 @@ def _maybe_speculate(audio: bytes) -> None:
     thr = _silence_threshold(rms)
     if float(rms.max()) <= 60.0:
         return  # nothing but silence so far — nothing to transcribe
-    if not _tail_is_silent(rms, thr):
+    # PERIODIC speculation (DHWANI_SPEC_PERIODIC_S, off by default).
+    #
+    # Today a speculation is armed only by trailing silence, so a speaker who
+    # never pauses gets none at all and their final is a cold whole-buffer
+    # decode. Arming every N seconds regardless covers that case, and pairs with
+    # DHWANI_SPEC_JOIN below: the newest COMPLETED speculation then becomes a
+    # prefix the final does not have to re-decode.
+    #
+    # This is the chunked final's job done without the chunked final's cost.
+    # DHWANI_CHUNK_S=6 measured -6.90/70 because each committed window is a
+    # SEGMENT decode that loses cross-boundary context; every speculation is a
+    # WHOLE-BUFFER decode with full context, so the same latency lever is pulled
+    # with the quality mechanism that caused the loss removed.
+    periodic = _env_f("DHWANI_SPEC_PERIODIC_S", 0.0)
+    due = periodic > 0 and (len(audio) - _spec_started) >= int(periodic * BYTES_PER_SEC)
+    if not _tail_is_silent(rms, thr) and not due:
         return
     if not _speech_after(rms, thr, _spec_covered):
         return  # the completed speculation already covers all speech
@@ -1491,6 +2109,69 @@ def _spec_take(audio: bytes, deadline: float | None = None) -> str | None:
     return text
 
 
+def _spec_prefix() -> tuple[str, int]:
+    """The newest COMPLETED speculation, whether or not it covers the clip.
+
+    _spec_take() is all-or-nothing: the moment speech resumes after a
+    speculation started, its whole answer is discarded and the final re-decodes
+    the buffer from zero — throwing away a full-quality decode of everything
+    before that point. Returns ("", 0) when there is nothing.
+    """
+    with _state_lock:
+        return (_spec_text or ""), _spec_covered
+
+
+def _spec_join_enabled() -> bool:
+    return _env_flag("DHWANI_SPEC_JOIN", False)
+
+
+def _start_spec_join(audio: bytes, deadline: float | None) -> tuple[object, dict] | None:
+    """Decode ONLY the audio a completed speculation didn't cover, and join.
+
+    The speculation is a whole-buffer decode of audio[:covered]; the tail is
+    everything after. That is exactly the chunked final's join, with two
+    properties the committer cannot offer:
+
+      * the split is guaranteed to sit in SILENCE. A speculation only arms when
+        the tail of the buffer has gone quiet, so `covered` is a pause by
+        construction — the cross-boundary context loss that cost chunking
+        -6.90/70 has no word to cut through here.
+      * the prefix was decoded with FULL context, not as an isolated ~6s window.
+
+    Returns None when there is nothing better than the ordinary path: no
+    completed speculation, it covers everything (_spec_take already took it), or
+    the committed windows already reach further.
+    """
+    if not _spec_join_enabled():
+        return None
+    text, covered = _spec_prefix()
+    if not text.strip() or covered <= 0 or covered >= len(audio):
+        return None
+    with _state_lock:
+        fc_bytes = _fc_bytes
+        lang_hint = _fc_lang if _fc_lang_pin() else None
+    if covered <= fc_bytes:
+        return None      # _final_decode already starts from the further point
+    if len(audio) - covered < int(0.2 * BYTES_PER_SEC):
+        return None      # nothing but a sliver left; the ordinary path is fine
+
+    box: dict[str, str] = {}
+
+    def _run() -> None:
+        try:
+            seg_text, _ = _decode_final_segment(
+                audio[covered:], pinned_lang=lang_hint,
+                prompt=text[-PROMPT_CHARS:], fast=True, deadline=deadline)
+            joined = _join_final(text, seg_text) if seg_text.strip() else text
+            box["text"] = _normalize_numbers(_deloop(joined))
+        except Exception as exc:
+            _log_error("speculation prefix-join (falling back to a full tail decode)", exc)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t, box
+
+
 # --- chunked final --------------------------------------------------------
 #
 # A whole-buffer final decode costs O(clip length): fine for a 10s dictation,
@@ -1531,9 +2212,9 @@ def _pause_end(audio: bytes, start: int, min_bytes: int) -> int | None:
         return None
     thr = _silence_threshold(rms)
     fb = int(FRAME_S * SR) * 2
-    need = max(1, int(PAUSE_S / FRAME_S))
+    need = max(1, int(_env_f("DHWANI_PAUSE_S", PAUSE_S) / FRAME_S))
     lo = (start + min_bytes) // fb
-    hi = len(rms) - int(CHUNK_SETTLE_S / FRAME_S)
+    hi = len(rms) - int(_env_f("DHWANI_SETTLE_S", CHUNK_SETTLE_S) / FRAME_S)
     if hi - lo < need:
         return None
     quiet = 0
@@ -1559,10 +2240,11 @@ def _maybe_commit_window(audio: bytes) -> None:
     if chunk <= 0 or _fc_busy or _spec_alive() or _finalizing:
         return
     window_bytes = _even(int(chunk * BYTES_PER_SEC))
-    settle = int(CHUNK_SETTLE_S * BYTES_PER_SEC)
+    settle = int(_env_f("DHWANI_SETTLE_S", CHUNK_SETTLE_S) * BYTES_PER_SEC)
     with _state_lock:
         start = _fc_bytes
-    pause_end = _pause_end(audio, start, _even(int(COMMIT_MIN_S * BYTES_PER_SEC)))
+    pause_end = _pause_end(audio, start,
+                           _even(int(_env_f("DHWANI_COMMIT_MIN_S", COMMIT_MIN_S) * BYTES_PER_SEC)))
     if pause_end is None and len(audio) - start < window_bytes + settle:
         return
 
@@ -1574,7 +2256,7 @@ def _maybe_commit_window(audio: bytes) -> None:
         global _fc_busy, _fc_text, _fc_bytes, _fc_lang
         try:
             with _state_lock:
-                lang, prompt = _fc_lang, _fc_text[-PROMPT_CHARS:]
+                lang, prompt = (_fc_lang if _fc_lang_pin() else None), _fc_text[-PROMPT_CHARS:]
             end = pe if pe is not None else _snap_end(buf, s + window_bytes)
             if end <= s + int(0.5 * BYTES_PER_SEC):
                 end = _even(s + window_bytes)   # snap found nothing usable
@@ -1585,7 +2267,7 @@ def _maybe_commit_window(audio: bytes) -> None:
                 if g == _clip_gen and _fc_bytes == s:
                     _fc_text = _join_final(_fc_text, seg_text)
                     _fc_bytes = end
-                    if _fc_lang is None:
+                    if _fc_lang is None and _fc_lang_pin():
                         _fc_lang = detected
         except Exception as exc:
             _log_error("window committer decode", exc)

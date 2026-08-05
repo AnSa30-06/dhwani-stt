@@ -45,6 +45,11 @@ def load_clips():
     for manifest, audio_dir in (
         (ROOT / "data/dev/manifest.json", ROOT / "data/dev/audio"),
         (ROOT / "samples/manifest.json", ROOT / "samples"),
+        # Adds only what the other two cannot supply — currently the stitched
+        # long-English clip, which stands in for a hidden-corpus category
+        # ("longer English speech") that no clip here covers. Deduped by id, so
+        # nothing above is counted twice.
+        (ROOT / "data/local/manifest.json", ROOT / "data/local/audio"),
     ):
         if not manifest.exists():
             continue
